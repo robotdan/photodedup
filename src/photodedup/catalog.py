@@ -60,7 +60,8 @@ CREATE TABLE IF NOT EXISTS asset (
     albums            TEXT,
     import_uuid       TEXT,
     survey_status     TEXT NOT NULL DEFAULT 'pending',
-    survey_error      TEXT
+    survey_error      TEXT,
+    exif_error        TEXT
 );
 
 CREATE INDEX IF NOT EXISTS asset_survey_status ON asset (survey_status);
