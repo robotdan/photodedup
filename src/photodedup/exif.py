@@ -28,6 +28,8 @@ EXIF_TAGS: tuple[str, ...] = (
     "Composite:GPSLongitude",
     "EXIF:ImageWidth",
     "EXIF:ImageHeight",
+    "ExifTool:Error",
+    "ExifTool:Warning",
 )
 
 

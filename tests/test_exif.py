@@ -71,10 +71,10 @@ def test_corrupt_file_in_chunk_with_valid_file(tmp_path, jpeg_with_date):
         f.write(os.urandom(600))
     result = read_metadata([corrupt_path, jpeg_with_date])
     assert str(corrupt_path) in result
-    assert "File:FileSize" in result[str(corrupt_path)]
-    assert "EXIF:DateTimeOriginal" not in result[str(corrupt_path)]
+    assert "ExifTool:Error" in result[str(corrupt_path)]
     assert str(jpeg_with_date) in result
     assert result[str(jpeg_with_date)]["EXIF:DateTimeOriginal"] == "2003:02:23 09:08:08"
+    assert "ExifTool:Error" not in result[str(jpeg_with_date)]
 
 
 def test_exiftool_failure_raises_error(tmp_path, jpeg_with_date):
