@@ -141,6 +141,39 @@ when no record has a `date_added`.
 - **Spike 5 — iCloud originals fully downloaded: OPEN, user-owned.** Blocks the
   real survey run only. See "The only outstanding Phase 1 action" above.
 
+## Phase 2 opportunity: clock-reset cohorts
+
+Investigated 2026-09-18, from the 2001-01-01 sentinel group.
+
+73 photos carry dates on Apple's 2001 reference epoch: 58 on 2001-01-01
+(01:14 to 23:39) and 15 on 2001-01-02. All are FUJIFILM FinePix2800ZOOM,
+firmware Ver7.00, and their EXIF `DateTimeOriginal`, `CreateDate` and
+`ModifyDate` all agree, so the camera genuinely believed that date when it
+wrote the files. The user identified the photos as Chicago, 3 August 2002.
+
+The same camera and firmware also produced correctly-dated photos on
+2002-08-03 (`Picture 124.jpg` at 16:17:14 through `Picture 134.jpg` at
+18:44:42, and more from 19:08 onward). So one camera produced both the
+reset run and correctly-dated frames around it.
+
+The recovery technique this suggests, for Phase 2. When a camera clock
+resets it returns to its epoch and keeps counting, so within the run the
+RELATIVE intervals between photos stay accurate and only the absolute
+origin is wrong. A run like this can therefore be corrected by shifting
+every member by one constant offset, derived from a single anchor. That
+makes these 73 photos recoverable even though nothing in their metadata
+is correct.
+
+Detection heuristic worth building: a contiguous run of photos from one
+camera model whose timestamps start at or near a known sentinel epoch and
+increase monotonically, bounded by correctly-dated photos from the same
+camera. Offer the user the run, ask for one anchor date, shift the whole
+run.
+
+This is why `sentinel_breakdown` in the report groups by VALUE and not
+just by count. Rejecting these dates is correct; discarding the photos'
+recoverability is not.
+
 ## Domain decisions
 
 - 2026-09-18, from the user: no photo in this library has a legitimate capture
