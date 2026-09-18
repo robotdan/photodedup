@@ -1,10 +1,11 @@
+import os
 import shutil
 import subprocess
 
 import pytest
 from PIL import Image
 
-from photodedup.exif import read_metadata
+from photodedup.exif import read_metadata, ExiftoolError
 
 pytestmark = pytest.mark.skipif(
     shutil.which("exiftool") is None, reason="exiftool not installed"
@@ -62,3 +63,25 @@ def test_chunking_covers_every_file(tmp_path):
         paths.append(path)
     result = read_metadata(paths, chunk_size=2)
     assert len(result) == 7
+
+
+def test_corrupt_file_in_chunk_with_valid_file(tmp_path, jpeg_with_date):
+    corrupt_path = tmp_path / "corrupt.jpg"
+    with open(corrupt_path, "wb") as f:
+        f.write(os.urandom(600))
+    result = read_metadata([corrupt_path, jpeg_with_date])
+    assert str(corrupt_path) in result
+    assert "File:FileSize" in result[str(corrupt_path)]
+    assert "EXIF:DateTimeOriginal" not in result[str(corrupt_path)]
+    assert str(jpeg_with_date) in result
+    assert result[str(jpeg_with_date)]["EXIF:DateTimeOriginal"] == "2003:02:23 09:08:08"
+
+
+def test_exiftool_failure_raises_error(tmp_path, jpeg_with_date):
+    with pytest.raises(ExiftoolError):
+        read_metadata([jpeg_with_date], exiftool="false")
+
+
+def test_nonexistent_binary_raises_file_not_found_error(jpeg_with_date):
+    with pytest.raises(FileNotFoundError):
+        read_metadata([jpeg_with_date], exiftool="/nonexistent/path/to/exiftool")

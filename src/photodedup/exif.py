@@ -8,6 +8,11 @@ import tempfile
 from collections.abc import Sequence
 from pathlib import Path
 
+
+class ExiftoolError(RuntimeError):
+    """exiftool failed for an entire chunk."""
+
+
 EXIF_TAGS: tuple[str, ...] = (
     "EXIF:DateTimeOriginal",
     "EXIF:CreateDate",
@@ -50,6 +55,10 @@ def _run_chunk(chunk: Sequence[Path], exiftool: str) -> list[dict[str, object]]:
         )
     finally:
         Path(argfile).unlink(missing_ok=True)
+
+    if completed.returncode != 0 and not completed.stdout.strip():
+        stderr_excerpt = completed.stderr[:500]
+        raise ExiftoolError(f"exiftool exit code {completed.returncode}: {stderr_excerpt}")
 
     if not completed.stdout.strip():
         return []
