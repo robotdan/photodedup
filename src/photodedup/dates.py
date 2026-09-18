@@ -78,16 +78,29 @@ SOURCE_RANK: dict[str, int] = {
     "file_mtime": 4,
 }
 
-# Values that software substitutes when it has no real date. Any candidate
-# landing within SENTINEL_WINDOW of one of these is discarded.
-SENTINEL_DATES: tuple[datetime, ...] = (
-    datetime(1970, 1, 1),   # Unix epoch
-    datetime(1904, 1, 1),   # QuickTime epoch
-    datetime(1980, 1, 1),   # FAT epoch
-    datetime(2001, 1, 1),   # Apple reference epoch
-    datetime(1899, 12, 30), # OLE automation epoch
-)
+# Default half-width for sentinel matching, used by every epoch that cannot
+# possibly be a real capture date in this library.
 SENTINEL_WINDOW = timedelta(days=1)
+
+# Values that software substitutes when it has no real date. Each sentinel
+# carries its own window because they are not equally safe to discard.
+#
+# 1904, 1899, 1970 and 1980 are pure software defaults; the user has confirmed
+# no photo in this library has a legitimate 1970 or 1980 date, so a full day
+# either side costs nothing.
+#
+# 2001-01-01 is Apple's reference epoch, but it is also a date a real photo can
+# have been taken on. A +/- 1 day window spans roughly two days of genuinely
+# discardable real captures. 14 hours still covers every timezone rendering of
+# a UTC-midnight epoch (UTC-12 through UTC+14) without reaching a full day into
+# 2000-12-31 or 2001-01-02.
+SENTINEL_DATES: tuple[tuple[datetime, timedelta], ...] = (
+    (datetime(1970, 1, 1), SENTINEL_WINDOW),    # Unix epoch
+    (datetime(1904, 1, 1), SENTINEL_WINDOW),    # QuickTime epoch
+    (datetime(1980, 1, 1), SENTINEL_WINDOW),    # FAT epoch
+    (datetime(2001, 1, 1), timedelta(hours=14)),  # Apple reference epoch
+    (datetime(1899, 12, 30), SENTINEL_WINDOW),  # OLE automation epoch
+)
 
 DEFAULT_DISAGREEMENT_MARGIN = timedelta(hours=26)
 
@@ -120,15 +133,24 @@ def rejection_reason(
     value = candidate.value
     if value is None:
         return "unparseable"
-    for sentinel in SENTINEL_DATES:
-        if abs(value - sentinel) < SENTINEL_WINDOW:
+    for sentinel, window in SENTINEL_DATES:
+        if abs(value - sentinel) < window:
             return "sentinel"
     if (now or datetime.now()) < value:
         return "future"
     # A capture always predates its own import into the library.
     if date_added is not None and value >= date_added:
         return "at_or_after_date_added"
-    if file_mtime is not None and value == file_mtime:
+    # A Photos database date that is exactly the file mtime is the mtime echoed
+    # back, not independent evidence. This is NOT true of other sources: a
+    # camera writes the file at the capture instant, so EXIF:DateTimeOriginal
+    # (or a filename date) equalling FileModifyDate is the normal signature of
+    # an untouched original and is corroboration, not fabrication.
+    if (
+        candidate.source == "photos_db"
+        and file_mtime is not None
+        and value == file_mtime
+    ):
         return "equals_file_mtime"
     if floor is not None and value < floor:
         return "below_floor"

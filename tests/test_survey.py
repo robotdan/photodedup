@@ -185,3 +185,50 @@ def test_exif_error_column_is_populated_from_exif_tags(conn):
     ).fetchone()
     assert broken["exif_error"] == "File format error"
     assert clean["exif_error"] is None
+
+
+def test_failed_asset_leaves_no_partial_date_candidates(conn, monkeypatch):
+    import photodedup.survey as survey_module
+
+    real_write = survey_module._write_asset
+
+    def flaky(c, record, tags):
+        if record.uuid == "bad":
+            # Insert a candidate first, then fail, to prove the cleanup runs
+            # against rows already written inside this transaction.
+            real_write(c, record, tags)
+            raise RuntimeError("boom")
+        return real_write(c, record, tags)
+
+    monkeypatch.setattr(survey_module, "_write_asset", flaky)
+
+    added = datetime(2020, 12, 18, 9, 12, 48)
+    records = [
+        record("good1", added=added, photos_date=datetime(2003, 2, 23, 9, 8, 8)),
+        record("bad", added=added, photos_date=datetime(2003, 2, 23, 9, 8, 8)),
+        record("good2", added=added, photos_date=datetime(2004, 5, 6, 7, 8, 9)),
+    ]
+    result = run_survey(conn, records, library_path=LIBRARY, read_exif=no_exif)
+
+    assert result.errors == 1
+    assert result.written == 2
+
+    bad = conn.execute("SELECT * FROM asset WHERE uuid='bad'").fetchone()
+    assert bad["survey_status"] == "error"
+    assert "boom" in bad["survey_error"]
+    assert (
+        conn.execute(
+            "SELECT COUNT(*) AS n FROM date_candidate WHERE uuid='bad'"
+        ).fetchone()["n"]
+        == 0
+    )
+
+    for uuid in ("good1", "good2"):
+        row = conn.execute("SELECT * FROM asset WHERE uuid=?", (uuid,)).fetchone()
+        assert row["survey_status"] == "ok"
+    assert (
+        conn.execute(
+            "SELECT value FROM date_candidate WHERE uuid='good1' AND source='photos_db'"
+        ).fetchone()["value"]
+        == "2003-02-23T09:08:08"
+    )

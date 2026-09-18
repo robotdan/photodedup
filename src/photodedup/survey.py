@@ -204,6 +204,12 @@ def run_survey(
                 written += 1
             except Exception as exc:
                 errors += 1
+                # _write_asset may have inserted candidates before failing; they
+                # share this uncommitted transaction, so drop them explicitly or
+                # the error row keeps partial candidates alongside it.
+                conn.execute(
+                    "DELETE FROM date_candidate WHERE uuid = ?", (record.uuid,)
+                )
                 conn.execute(
                     """
                     INSERT INTO asset (uuid, survey_status, survey_error)

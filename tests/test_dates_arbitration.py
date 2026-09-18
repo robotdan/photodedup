@@ -2,7 +2,13 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from photodedup.dates import Candidate, choose_date, rejection_reason
+from photodedup.dates import (
+    SENTINEL_DATES,
+    SENTINEL_WINDOW,
+    Candidate,
+    choose_date,
+    rejection_reason,
+)
 
 ADDED = datetime(2020, 12, 18, 9, 12, 48)
 MTIME = datetime(2019, 5, 5, 5, 5, 5)
@@ -49,8 +55,70 @@ def test_rejects_sentinel_dates(value):
     assert reason(value) == "sentinel"
 
 
-def test_rejects_date_equal_to_file_mtime():
-    assert reason(MTIME) == "equals_file_mtime"
+def test_photos_db_date_equal_to_file_mtime_is_rejected():
+    assert (
+        rejection_reason(
+            Candidate("photos_db", MTIME, None),
+            date_added=ADDED,
+            file_mtime=MTIME,
+            now=NOW,
+        )
+        == "equals_file_mtime"
+    )
+
+
+@pytest.mark.parametrize("source", ["exif", "filename", "takeout_json", "file_mtime"])
+def test_non_photos_db_date_equal_to_file_mtime_survives(source):
+    # A camera writes the file at the capture instant, so FileModifyDate ==
+    # DateTimeOriginal exactly is the signature of an untouched original.
+    assert (
+        rejection_reason(
+            Candidate(source, MTIME, None),
+            date_added=ADDED,
+            file_mtime=MTIME,
+            now=NOW,
+        )
+        is None
+    )
+
+
+def test_file_mtime_candidate_equal_to_itself_survives():
+    # survey.py passes the file_mtime candidate's own value as file_mtime, so
+    # the old rule made rung 5 of the trust ladder dead by construction.
+    assert (
+        rejection_reason(
+            Candidate("file_mtime", MTIME, None),
+            date_added=ADDED,
+            file_mtime=MTIME,
+            now=NOW,
+        )
+        is None
+    )
+
+
+def test_true_date_wins_when_it_equals_mtime_and_photos_db_holds_import_time():
+    # Regression for the inversion: both good sources sat exactly on mtime and
+    # were discarded, leaving the wrong import date as the sole survivor, which
+    # then won unflagged because one survivor has zero spread.
+    true_date = datetime(2003, 2, 23, 9, 8, 8)
+    import_date = ADDED - timedelta(minutes=5)
+    decision = choose_date(
+        [
+            Candidate("exif", true_date, None),
+            Candidate("filename", true_date, None),
+            Candidate("photos_db", import_date, None),
+        ],
+        date_added=ADDED,
+        file_mtime=true_date,
+        now=NOW,
+    )
+    assert decision.value == true_date
+    assert decision.source == "exif"
+
+
+def test_2001_sentinel_window_is_narrower_than_a_day():
+    assert reason(datetime(2001, 1, 1, 6, 0, 0)) == "sentinel"
+    assert reason(datetime(2001, 1, 1, 20, 0, 0)) is None
 
 
 def test_rejects_date_below_floor():
@@ -136,3 +204,10 @@ def test_single_surviving_candidate_does_not_flag_review():
         now=NOW,
     )
     assert decision.needs_review is False
+
+
+def test_sentinel_dates_carry_per_entry_windows():
+    windows = dict(SENTINEL_DATES)
+    assert windows[datetime(1970, 1, 1)] == SENTINEL_WINDOW
+    assert windows[datetime(1980, 1, 1)] == SENTINEL_WINDOW
+    assert windows[datetime(2001, 1, 1)] == timedelta(hours=14)

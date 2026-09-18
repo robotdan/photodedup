@@ -37,10 +37,17 @@ def survey(library: Path, catalog: Path) -> None:
         result = run_survey(conn, iter_assets(library), library_path=str(library))
     except (LibraryUnavailable, MissingOriginalsError) as exc:
         raise click.ClickException(str(exc)) from exc
+    # Lead with the total in scope. On a fully resumed run `written` is 0,
+    # which reads as "the survey did nothing" if it comes first.
     click.echo(
-        f"surveyed {result.total} assets: {result.written} written, "
-        f"{result.skipped_after_cutoff} after cutoff, "
-        f"{result.missing_originals} without originals, {result.errors} errors"
+        f"{result.total} assets in scope "
+        f"({result.written} written this run, "
+        f"{result.total - result.written - result.errors} already complete, "
+        f"{result.errors} errors)"
+    )
+    click.echo(
+        f"{result.skipped_after_cutoff} skipped after cutoff, "
+        f"{result.missing_originals} without local originals"
     )
 
 
