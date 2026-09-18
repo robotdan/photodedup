@@ -77,7 +77,6 @@ def _install_photoscript_stub() -> None:
         module = types.ModuleType(name)
         module.__getattr__ = lambda _attr: _Unavailable  # type: ignore[method-assign]
         sys.modules[name] = module
-    sys.modules["photoscript.script_loader"].run_script = lambda *a, **k: None
 
 
 def _naive(value: datetime | None) -> datetime | None:
@@ -116,6 +115,10 @@ def iter_assets(library_path: Path) -> Iterator[AssetRecord]:
             f"osxphotos could not open {library_path}: {exc}. Check Full Disk Access."
         ) from exc
 
+    return _iter_records(db)
+
+
+def _iter_records(db: object) -> Iterator[AssetRecord]:
     for photo in db.photos(movies=True, intrash=False):
         yield AssetRecord(
             uuid=photo.uuid,

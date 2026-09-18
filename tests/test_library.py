@@ -27,6 +27,13 @@ def test_missing_library_raises_library_unavailable(tmp_path):
     assert "Full Disk Access" in str(excinfo.value)
 
 
+def test_missing_library_raises_eagerly_without_iterating(tmp_path):
+    """iter_assets must validate before returning, not on first next()."""
+    with pytest.raises(LibraryUnavailable) as excinfo:
+        iter_assets(tmp_path / "Nope.photoslibrary")
+    assert "Full Disk Access" in str(excinfo.value)
+
+
 def test_photoscript_stub_lets_osxphotos_import():
     """osxphotos must import even where AppleScript compilation is impossible."""
     from photodedup.library import _install_photoscript_stub
