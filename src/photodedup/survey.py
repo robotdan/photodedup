@@ -153,6 +153,7 @@ def run_survey(
     cutoff: datetime | None = None,
     read_exif: Callable[..., dict[str, dict[str, object]]] = read_metadata,
     batch_size: int = 400,
+    missing_tolerance: float = MISSING_ORIGINALS_TOLERANCE,
 ) -> SurveyResult:
     """Populate the catalog from *records*. Idempotent and resumable."""
     set_stage(conn, "survey", "running")
@@ -177,12 +178,16 @@ def run_survey(
             in_scope.append(record)
 
     missing = sum(1 for r in in_scope if r.path is None)
-    if in_scope and missing / len(in_scope) > MISSING_ORIGINALS_TOLERANCE:
+    if in_scope and missing / len(in_scope) > missing_tolerance:
         set_stage(conn, "survey", "failed", notes=f"{missing} assets lack originals")
         raise MissingOriginalsError(
-            f"{missing} of {len(in_scope)} assets have no local original. Enable "
-            "Download Originals to this Mac in Photos, wait for it to finish, "
-            "then re-run the survey."
+            f"{missing} of {len(in_scope)} assets ({100 * missing / len(in_scope):.2f}%) "
+            f"have no local original, above the {100 * missing_tolerance:.2f}% tolerance. "
+            "An asset without a local original yields no EXIF, so it silently loses the "
+            "date source that matters most. Enable Download Originals to this Mac in "
+            "Photos and wait for it to finish, or pass --missing-tolerance to proceed "
+            "anyway once you have confirmed the missing assets do not matter for your "
+            "question. They are recorded in the catalog either way."
         )
 
     done = {

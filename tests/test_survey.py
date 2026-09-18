@@ -232,3 +232,29 @@ def test_failed_asset_leaves_no_partial_date_candidates(conn, monkeypatch):
         ).fetchone()["value"]
         == "2003-02-23T09:08:08"
     )
+
+
+def test_missing_tolerance_can_be_raised(conn):
+    """A caller who knows the missing assets are irrelevant can proceed."""
+    records = [
+        record("u1", added=datetime(2020, 12, 18, 9, 12, 48), path=None),
+        record("u2", added=datetime(2020, 12, 18, 9, 12, 49)),
+    ]
+    result = run_survey(
+        conn, records, library_path=LIBRARY, read_exif=no_exif, missing_tolerance=0.5
+    )
+    assert result.missing_originals == 1
+    assert result.written == 2
+
+
+def test_missing_tolerance_still_aborts_above_the_raised_bar(conn):
+    records = [
+        record("u1", added=datetime(2020, 12, 18, 9, 12, 48), path=None),
+        record("u2", added=datetime(2020, 12, 18, 9, 12, 49), path=None),
+        record("u3", added=datetime(2020, 12, 18, 9, 12, 50)),
+    ]
+    with pytest.raises(MissingOriginalsError) as excinfo:
+        run_survey(
+            conn, records, library_path=LIBRARY, read_exif=no_exif, missing_tolerance=0.5
+        )
+    assert "--missing-tolerance" in str(excinfo.value)
