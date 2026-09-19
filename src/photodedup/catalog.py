@@ -6,7 +6,7 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 DATE_SOURCES = ("takeout_json", "exif", "filename", "photos_db", "file_mtime")
 
@@ -75,7 +75,49 @@ CREATE TABLE IF NOT EXISTS date_candidate (
     rejected_reason TEXT,
     PRIMARY KEY (uuid, source)
 );
+
+CREATE TABLE IF NOT EXISTS asset_hash (
+    uuid         TEXT PRIMARY KEY REFERENCES asset (uuid) ON DELETE CASCADE,
+    status       TEXT NOT NULL CHECK (status IN ('ok', 'error', 'no_original', 'skipped')),
+    error        TEXT,
+    scan_hash    TEXT,
+    pixel_hash   TEXT,
+    dhash        TEXT,
+    phash        TEXT,
+    video_hash   TEXT,
+    pixel_width  INTEGER,
+    pixel_height INTEGER,
+    bytes_read   INTEGER,
+    hashed_at    TEXT
+);
+
+CREATE INDEX IF NOT EXISTS asset_hash_status ON asset_hash (status);
+CREATE INDEX IF NOT EXISTS asset_hash_scan ON asset_hash (scan_hash);
+CREATE INDEX IF NOT EXISTS asset_hash_pixel ON asset_hash (pixel_hash);
+CREATE INDEX IF NOT EXISTS asset_hash_video ON asset_hash (video_hash);
+CREATE INDEX IF NOT EXISTS asset_hash_dhash ON asset_hash (dhash);
+
+CREATE TABLE IF NOT EXISTS dup_group (
+    id     INTEGER PRIMARY KEY,
+    signal TEXT NOT NULL CHECK (signal IN ('scan', 'pixel', 'video', 'dhash')),
+    tier   TEXT NOT NULL CHECK (tier IN ('exact', 'candidate')),
+    digest TEXT NOT NULL,
+    size   INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS dup_member (
+    group_id INTEGER NOT NULL REFERENCES dup_group (id) ON DELETE CASCADE,
+    uuid     TEXT NOT NULL REFERENCES asset (uuid) ON DELETE CASCADE,
+    PRIMARY KEY (group_id, uuid)
+);
+
+CREATE INDEX IF NOT EXISTS dup_member_uuid ON dup_member (uuid);
+CREATE INDEX IF NOT EXISTS dup_group_tier ON dup_group (tier, signal);
 """
+
+
+class SchemaVersionMismatch(RuntimeError):
+    """The catalog on disk was written by a different schema version."""
 
 
 def open_catalog(path: Path) -> sqlite3.Connection:
@@ -88,6 +130,14 @@ def open_catalog(path: Path) -> sqlite3.Connection:
     if conn.execute("SELECT COUNT(*) AS n FROM schema_meta").fetchone()["n"] == 0:
         conn.execute("INSERT INTO schema_meta (version) VALUES (?)", (SCHEMA_VERSION,))
     conn.commit()
+    found = conn.execute("SELECT version FROM schema_meta").fetchone()["version"]
+    if found != SCHEMA_VERSION:
+        conn.close()
+        raise SchemaVersionMismatch(
+            f"catalog at {path} is schema version {found}, this code expects "
+            f"{SCHEMA_VERSION}. Delete the catalog and re-run the survey; it is "
+            "a derived artifact and takes about five minutes to rebuild."
+        )
     return conn
 
 

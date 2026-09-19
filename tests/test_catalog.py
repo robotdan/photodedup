@@ -4,6 +4,7 @@ import pytest
 
 from photodedup.catalog import (
     SCHEMA_VERSION,
+    SchemaVersionMismatch,
     get_run,
     get_stage,
     open_catalog,
@@ -77,3 +78,49 @@ def test_date_candidate_cascades_on_asset_delete(conn):
     )
     conn.execute("DELETE FROM asset WHERE uuid = 'u1'")
     assert conn.execute("SELECT COUNT(*) AS n FROM date_candidate").fetchone()["n"] == 0
+
+
+def test_asset_hash_table_exists(conn):
+    tables = {
+        row["name"]
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+    assert "asset_hash" in tables
+
+
+def test_asset_hash_cascades_on_asset_delete(conn):
+    conn.execute("INSERT INTO asset (uuid) VALUES ('u1')")
+    conn.execute(
+        "INSERT INTO asset_hash (uuid, status) VALUES ('u1', 'ok')"
+    )
+    conn.execute("DELETE FROM asset WHERE uuid = 'u1'")
+    assert conn.execute("SELECT COUNT(*) AS n FROM asset_hash").fetchone()["n"] == 0
+
+
+def test_asset_hash_status_is_constrained(conn):
+    conn.execute("INSERT INTO asset (uuid) VALUES ('u1')")
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("INSERT INTO asset_hash (uuid, status) VALUES ('u1', 'banana')")
+
+
+def test_asset_hash_is_one_row_per_asset(conn):
+    conn.execute("INSERT INTO asset (uuid) VALUES ('u1')")
+    conn.execute("INSERT INTO asset_hash (uuid, status) VALUES ('u1', 'ok')")
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("INSERT INTO asset_hash (uuid, status) VALUES ('u1', 'ok')")
+
+
+def test_schema_version_is_two(conn):
+    assert SCHEMA_VERSION == 2
+
+
+def test_version_mismatch_is_refused(tmp_path):
+    path = tmp_path / "catalog.sqlite"
+    open_catalog(path).close()
+    conn = sqlite3.connect(path)
+    conn.execute("UPDATE schema_meta SET version = 1")
+    conn.commit()
+    conn.close()
+    with pytest.raises(SchemaVersionMismatch) as excinfo:
+        open_catalog(path)
+    assert "re-run the survey" in str(excinfo.value)
