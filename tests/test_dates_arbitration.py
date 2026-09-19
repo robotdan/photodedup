@@ -3,10 +3,13 @@ from datetime import datetime, timedelta
 import pytest
 
 from photodedup.dates import (
+    IMPORT_STAMPS,
     SENTINEL_DATES,
     SENTINEL_WINDOW,
     Candidate,
+    Pool,
     choose_date,
+    choose_date_pooled,
     rejection_reason,
 )
 
@@ -147,7 +150,11 @@ def test_earliest_surviving_candidate_wins():
     )
     assert decision.value == datetime(2003, 2, 23, 9, 8, 8)
     assert decision.source == "exif"
-    assert ("photos_db", "at_or_after_date_added") in decision.rejected
+    # ADDED sits inside IMPORT_STAMPS[0], so the same instant is both the date
+    # this candidate is rejected against and a stamped import window; either
+    # reason is a correct rejection of the photos_db candidate.
+    assert decision.rejected[0][0] == "photos_db"
+    assert decision.rejected[0][1] in ("at_or_after_date_added", "import_stamp")
 
 
 def test_source_rank_breaks_exact_ties():
@@ -223,3 +230,110 @@ def test_sentinel_dates_carry_per_entry_windows():
     assert windows[datetime(1970, 1, 1)] == SENTINEL_WINDOW
     assert windows[datetime(1980, 1, 1)] == SENTINEL_WINDOW
     assert windows[datetime(2001, 1, 1)] == SENTINEL_WINDOW
+
+
+STAMP_2020 = datetime(2020, 12, 18, 9, 10, 0)
+
+
+def test_photos_db_inside_an_import_stamp_is_rejected():
+    why = rejection_reason(
+        Candidate("photos_db", STAMP_2020, None),
+        date_added=datetime(2020, 12, 18, 18, 0, 0), file_mtime=MTIME, now=NOW,
+    )
+    assert why == "import_stamp"
+
+
+def test_exif_inside_an_import_stamp_survives():
+    """One asset in the 2023 batch carries a genuine EXIF date inside the
+    interval. Stamps only ever reject what Photos recorded."""
+    why = rejection_reason(
+        Candidate("exif", datetime(2023, 1, 14, 11, 20, 0), None),
+        date_added=datetime(2023, 1, 14, 12, 0, 0), file_mtime=MTIME, now=NOW,
+    )
+    assert why is None
+
+
+def test_photos_db_one_second_outside_a_stamp_survives():
+    start, end = IMPORT_STAMPS[0]
+    added = datetime(2020, 12, 31, 0, 0, 0)
+    for value in (start - timedelta(seconds=1), end + timedelta(seconds=1)):
+        assert rejection_reason(
+            Candidate("photos_db", value, None),
+            date_added=added, file_mtime=MTIME, now=NOW,
+        ) is None
+    for value in (start, end):
+        assert rejection_reason(
+            Candidate("photos_db", value, None),
+            date_added=added, file_mtime=MTIME, now=NOW,
+        ) == "import_stamp"
+
+
+def test_stamps_can_be_switched_off():
+    why = rejection_reason(
+        Candidate("photos_db", STAMP_2020, None),
+        date_added=datetime(2020, 12, 18, 18, 0, 0), file_mtime=MTIME, now=NOW,
+        stamps=(),
+    )
+    assert why is None
+
+
+def test_choose_date_prefers_exif_over_a_stamped_photos_date():
+    decision = choose_date(
+        [Candidate("photos_db", STAMP_2020, None),
+         Candidate("exif", datetime(2014, 5, 12, 17, 0, 0), None)],
+        date_added=datetime(2020, 12, 18, 18, 0, 0), file_mtime=MTIME, now=NOW,
+    )
+    assert decision.value == datetime(2014, 5, 12, 17, 0, 0)
+    assert decision.source == "exif"
+    assert ("photos_db", "import_stamp") in decision.rejected
+    assert decision.needs_review is False
+
+
+def test_pooled_choice_rescues_a_date_across_members():
+    """Cohort A member has only a stamped Photos date; its twin carries EXIF."""
+    stamped = Pool(
+        (Candidate("photos_db", STAMP_2020, None),),
+        date_added=datetime(2020, 12, 18, 18, 0, 0), file_mtime=MTIME,
+    )
+    twin = Pool(
+        (Candidate("exif", datetime(2014, 5, 12, 17, 0, 0), None),
+         Candidate("photos_db", datetime(2014, 5, 12, 17, 0, 0), None)),
+        date_added=datetime(2015, 1, 1), file_mtime=MTIME,
+    )
+    decision = choose_date_pooled([stamped, twin], now=NOW)
+    assert decision.value == datetime(2014, 5, 12, 17, 0, 0)
+    assert decision.source == "exif"
+    assert decision.needs_review is False
+
+
+def test_pooled_choice_rejects_against_each_members_own_date_added():
+    """A value after member A's date_added but before member B's survives via B."""
+    value = datetime(2019, 6, 1)
+    a = Pool((Candidate("photos_db", value, None),), date_added=datetime(2018, 1, 1), file_mtime=MTIME)
+    b = Pool((Candidate("photos_db", value, None),), date_added=datetime(2020, 1, 1), file_mtime=MTIME)
+    decision = choose_date_pooled([a, b], now=NOW)
+    assert decision.value == value
+    assert ("photos_db", "at_or_after_date_added") in decision.rejected
+
+
+def test_pooled_choice_flags_disagreement_across_members():
+    a = Pool((Candidate("exif", datetime(2014, 1, 1), None),), date_added=datetime(2020, 1, 1), file_mtime=MTIME)
+    b = Pool((Candidate("exif", datetime(2016, 1, 1), None),), date_added=datetime(2020, 1, 1), file_mtime=MTIME)
+    decision = choose_date_pooled([a, b], now=NOW)
+    assert decision.value == datetime(2014, 1, 1)
+    assert decision.needs_review is True
+    assert decision.review_reason == "candidates_disagree"
+
+
+def test_pooled_choice_with_no_survivors_needs_review():
+    a = Pool((Candidate("photos_db", STAMP_2020, None),), date_added=datetime(2020, 12, 18, 18, 0), file_mtime=MTIME)
+    decision = choose_date_pooled([a], now=NOW)
+    assert decision.value is None
+    assert decision.review_reason == "no_plausible_candidate"
+
+
+def test_choose_date_is_the_one_pool_case():
+    candidates = [Candidate("exif", datetime(2014, 1, 1), None)]
+    single = choose_date(candidates, date_added=ADDED, file_mtime=MTIME, now=NOW)
+    pooled = choose_date_pooled([Pool(tuple(candidates), ADDED, MTIME)], now=NOW)
+    assert single == pooled

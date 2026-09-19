@@ -271,3 +271,23 @@ def test_error_rows_are_excluded_from_aggregates(conn):
     assert "| image | 1 |" in kinds
     assert "None" not in kinds
     assert "| survey errors | 1 |" in report
+
+
+def test_exif_vs_photos_db_treats_a_stamped_photos_date_as_rejected(conn):
+    """The Python rewrite must apply the same rules as choose_date, including
+    the import stamps the old SQL could not know about."""
+    conn.execute(
+        """INSERT INTO asset (uuid, survey_status, date_added, file_mtime)
+           VALUES ('u1', 'ok', '2020-12-18T18:00:00', '2019-01-01T00:00:00')"""
+    )
+    conn.execute(
+        """INSERT INTO date_candidate (uuid, source, value, raw, rejected_reason)
+           VALUES ('u1', 'exif', '2014-05-12T17:00:00', 'x', NULL)"""
+    )
+    conn.execute(
+        """INSERT INTO date_candidate (uuid, source, value, raw, rejected_reason)
+           VALUES ('u1', 'photos_db', '2020-12-18T09:10:00', 'x', NULL)"""
+    )
+    conn.commit()
+    counts = dict(exif_vs_photos_db(conn))
+    assert counts["exif_only_photos_rejected"] == 1

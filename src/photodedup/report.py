@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from sqlite3 import Connection
 
 from photodedup.catalog import get_run
-from photodedup.dates import DEFAULT_DISAGREEMENT_MARGIN
+from photodedup.dates import DEFAULT_DISAGREEMENT_MARGIN, Candidate, rejection_reason
 
 # Seconds of difference below which two dates for the same asset are treated as
 # a timezone rendering of the same instant rather than a real conflict.
@@ -79,40 +80,6 @@ _EXIF_VS_PHOTOS_LABELS: tuple[tuple[str, str], ...] = (
     ("neither", "neither source usable"),
 )
 
-_EXIF_VS_PHOTOS_SQL = """
-WITH pivot AS (
-    SELECT
-        a.uuid AS uuid,
-        MAX(CASE WHEN c.source = 'exif' THEN c.value END) AS e_val,
-        MAX(CASE WHEN c.source = 'exif' THEN c.rejected_reason END) AS e_rej,
-        MAX(CASE WHEN c.source = 'photos_db' THEN c.value END) AS p_val,
-        MAX(CASE WHEN c.source = 'photos_db' THEN c.rejected_reason END) AS p_rej
-    FROM asset a
-    LEFT JOIN date_candidate c
-        ON c.uuid = a.uuid AND c.source IN ('exif', 'photos_db')
-    WHERE a.survey_status = 'ok'
-    GROUP BY a.uuid
-),
-classified AS (
-    SELECT CASE
-        WHEN e_val IS NOT NULL AND e_rej IS NULL
-             AND p_val IS NOT NULL AND p_rej IS NULL THEN
-            CASE
-                WHEN e_val = p_val THEN 'both_equal'
-                WHEN ABS(strftime('%s', e_val) - strftime('%s', p_val))
-                     <= :margin THEN 'both_close'
-                ELSE 'both_far'
-            END
-        WHEN e_val IS NOT NULL AND e_rej IS NULL THEN 'exif_only_photos_rejected'
-        WHEN p_val IS NOT NULL AND p_rej IS NULL THEN 'photos_only'
-        ELSE 'neither'
-    END AS bucket
-    FROM pivot
-)
-SELECT bucket, COUNT(*) AS n FROM classified GROUP BY bucket
-"""
-
-
 def exif_vs_photos_db(conn: Connection) -> list[tuple[str, int]]:
     """Cross-tabulate the EXIF date against the Photos database date per asset.
 
@@ -120,17 +87,66 @@ def exif_vs_photos_db(conn: Connection) -> list[tuple[str, int]]:
     The cohort A recovery case is precisely the one where the Photos date is
     REJECTED and the EXIF date survives: measured over survivors alone it looks
     like a single-candidate asset in perfect agreement with itself. This pivot
-    uses the raw parsed value and its rejection state, so that case gets its
-    own row.
+    re-evaluates each candidate through `rejection_reason`, the one authority,
+    so the stored `rejected_reason` column is never trusted over the rules.
 
     Returns one (bucket_key, count) pair for every combination, in a fixed
     order, including zero rows.
     """
-    counts = {
-        row["bucket"]: row["n"]
-        for row in conn.execute(_EXIF_VS_PHOTOS_SQL, {"margin": _MARGIN_SECONDS})
-    }
+    rows = conn.execute(
+        """
+        SELECT a.uuid AS uuid, a.date_added AS added, a.file_mtime AS mtime,
+               c.source AS source, c.value AS value
+        FROM asset a
+        LEFT JOIN date_candidate c
+            ON c.uuid = a.uuid AND c.source IN ('exif', 'photos_db')
+        WHERE a.survey_status = 'ok'
+        ORDER BY a.uuid
+        """
+    ).fetchall()
+
+    per_asset: dict[str, dict] = {}
+    for row in rows:
+        entry = per_asset.setdefault(
+            row["uuid"],
+            {"added": _parse(row["added"]), "mtime": _parse(row["mtime"]), "exif": None, "photos_db": None},
+        )
+        if row["source"] is not None:
+            entry[row["source"]] = _parse(row["value"])
+
+    counts: dict[str, int] = {}
+    for entry in per_asset.values():
+        usable = {}
+        for source in ("exif", "photos_db"):
+            value = entry[source]
+            if value is None:
+                continue
+            why = rejection_reason(
+                Candidate(source, value, None),
+                date_added=entry["added"], file_mtime=entry["mtime"],
+            )
+            if why is None:
+                usable[source] = value
+        if "exif" in usable and "photos_db" in usable:
+            gap = abs((usable["exif"] - usable["photos_db"]).total_seconds())
+            if gap == 0:
+                bucket = "both_equal"
+            elif gap <= _MARGIN_SECONDS:
+                bucket = "both_close"
+            else:
+                bucket = "both_far"
+        elif "exif" in usable:
+            bucket = "exif_only_photos_rejected"
+        elif "photos_db" in usable:
+            bucket = "photos_only"
+        else:
+            bucket = "neither"
+        counts[bucket] = counts.get(bucket, 0) + 1
     return [(key, counts.get(key, 0)) for key, _label in _EXIF_VS_PHOTOS_LABELS]
+
+
+def _parse(value: str | None) -> datetime | None:
+    return None if value is None else datetime.fromisoformat(value)
 
 
 def sentinel_breakdown(conn: Connection) -> list[tuple[str, str, int]]:

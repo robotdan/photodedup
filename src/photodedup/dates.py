@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -111,6 +112,22 @@ SENTINEL_DATES: tuple[tuple[datetime, timedelta], ...] = (
 
 DEFAULT_DISAGREEMENT_MARGIN = timedelta(hours=26)
 
+# Import-time stamps. Two bulk imports into this library overwrote capture
+# dates with the import clock (STATE.md, "Phase 1 result"). Each interval is
+# the earliest and latest photos_date in that batch, measured from the catalog
+# on 2026-09-19. Only a `photos_db` candidate is rejected by these: a genuine
+# EXIF date inside the interval survives, and one asset in the 2023 batch has
+# exactly that.
+#
+# These are a domain decision, like SENTINEL_DATES, not something derived from
+# cluster size: a real hour in this library holds 218 photos, as many as the
+# 2023 stamp. The survey report's capture-hour clustering is how a human finds
+# stamps on another library; this constant is where they are then recorded.
+IMPORT_STAMPS: tuple[tuple[datetime, datetime], ...] = (
+    (datetime(2020, 12, 18, 9, 3, 42), datetime(2020, 12, 18, 9, 26, 2)),
+    (datetime(2023, 1, 14, 11, 6, 19), datetime(2023, 1, 14, 11, 49, 25)),
+)
+
 
 @dataclass(frozen=True)
 class Candidate:
@@ -135,6 +152,7 @@ def rejection_reason(
     file_mtime: datetime | None,
     floor: datetime | None = None,
     now: datetime | None = None,
+    stamps: Sequence[tuple[datetime, datetime]] = IMPORT_STAMPS,
 ) -> str | None:
     """Return why *candidate* cannot be trusted, or None if it survives."""
     value = candidate.value
@@ -143,6 +161,10 @@ def rejection_reason(
     for sentinel, window in SENTINEL_DATES:
         if abs(value - sentinel) < window:
             return "sentinel"
+    if candidate.source == "photos_db" and any(
+        start <= value <= end for start, end in stamps
+    ):
+        return "import_stamp"
     if (now or datetime.now()) < value:
         return "future"
     # A capture always predates its own import into the library.
@@ -164,26 +186,47 @@ def rejection_reason(
     return None
 
 
-def choose_date(
-    candidates: list[Candidate],
+@dataclass(frozen=True)
+class Pool:
+    """One asset's candidates with the context its rejection rules need.
+
+    Rejection is per asset: `date_added` differs between the two members of a
+    cohort A / cohort B pair, and that difference is the whole reason one of
+    them can rescue the other's date.
+    """
+
+    candidates: tuple[Candidate, ...]
+    date_added: datetime | None
+    file_mtime: datetime | None
+
+
+def choose_date_pooled(
+    pools: Sequence[Pool],
     *,
-    date_added: datetime | None,
-    file_mtime: datetime | None,
     floor: datetime | None = None,
     now: datetime | None = None,
     margin: timedelta = DEFAULT_DISAGREEMENT_MARGIN,
+    stamps: Sequence[tuple[datetime, datetime]] = IMPORT_STAMPS,
 ) -> Decision:
-    """Pick the winning capture date: earliest survivor, source rank breaking ties."""
+    """Pick one capture date across every pool: earliest survivor, source rank
+    breaking ties. This is the single date authority; nothing else may
+    re-express its rules."""
     survivors: list[Candidate] = []
     rejected: list[tuple[str, str]] = []
-    for candidate in candidates:
-        why = rejection_reason(
-            candidate, date_added=date_added, file_mtime=file_mtime, floor=floor, now=now
-        )
-        if why is None:
-            survivors.append(candidate)
-        else:
-            rejected.append((candidate.source, why))
+    for pool in pools:
+        for candidate in pool.candidates:
+            why = rejection_reason(
+                candidate,
+                date_added=pool.date_added,
+                file_mtime=pool.file_mtime,
+                floor=floor,
+                now=now,
+                stamps=stamps,
+            )
+            if why is None:
+                survivors.append(candidate)
+            else:
+                rejected.append((candidate.source, why))
 
     if not survivors:
         return Decision(None, None, tuple(rejected), True, "no_plausible_candidate")
@@ -200,4 +243,21 @@ def choose_date(
         tuple(rejected),
         disagree,
         "candidates_disagree" if disagree else None,
+    )
+
+
+def choose_date(
+    candidates: list[Candidate],
+    *,
+    date_added: datetime | None,
+    file_mtime: datetime | None,
+    floor: datetime | None = None,
+    now: datetime | None = None,
+    margin: timedelta = DEFAULT_DISAGREEMENT_MARGIN,
+    stamps: Sequence[tuple[datetime, datetime]] = IMPORT_STAMPS,
+) -> Decision:
+    """Pick the winning capture date for a single asset."""
+    return choose_date_pooled(
+        [Pool(tuple(candidates), date_added, file_mtime)],
+        floor=floor, now=now, margin=margin, stamps=stamps,
     )

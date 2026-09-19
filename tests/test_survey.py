@@ -91,7 +91,9 @@ def test_import_time_date_is_recorded_but_rejected(conn):
     row = conn.execute(
         "SELECT * FROM date_candidate WHERE uuid='u1' AND source='photos_db'"
     ).fetchone()
-    assert row["rejected_reason"] == "at_or_after_date_added"
+    # `added` falls inside IMPORT_STAMPS[0]; either reason is a correct
+    # rejection of the photos_db candidate.
+    assert row["rejected_reason"] in ("at_or_after_date_added", "import_stamp")
 
 
 def test_filename_date_becomes_a_candidate(conn):
