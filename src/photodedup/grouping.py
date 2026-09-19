@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from sqlite3 import Connection
 
 from photodedup.catalog import get_stage, set_stage
+from photodedup.sets import run_sets
 
 # (signal, hash column, tier). Order is the trust order and is also the order
 # the review report presents them in. A None column marks a signal computed by
@@ -36,6 +37,8 @@ class GroupResult:
     groups: int
     members: int
     removable: int
+    exact_sets: int = 0
+    candidate_sets: int = 0
 
 
 def _read_prefix(path: str, length: int) -> bytes | None:
@@ -167,9 +170,17 @@ def run_group(conn: Connection, *, force: bool = False) -> GroupResult:
         insert("prefix", "exact", digest, uuids)
 
     conn.commit()
+    sets = run_sets(conn)
     removable = members - groups
     set_stage(
         conn, "group", "complete",
-        notes=f"{groups} groups, {members} members, {removable} removable",
+        notes=(
+            f"{groups} groups, {members} members, {removable} removable; "
+            f"{sets.exact_sets} exact sets over {sets.exact_assets} assets, "
+            f"{sets.candidate_sets} candidate sets"
+        ),
     )
-    return GroupResult(groups=groups, members=members, removable=removable)
+    return GroupResult(
+        groups=groups, members=members, removable=removable,
+        exact_sets=sets.exact_sets, candidate_sets=sets.candidate_sets,
+    )

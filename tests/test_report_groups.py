@@ -176,3 +176,14 @@ def test_coverage_counts_truncated_rows(conn):
     counts = dict(coverage(conn))
     assert counts["hashed ok"] == 1
     assert counts["hashed leniently (truncated)"] == 1
+
+
+def test_exact_components_reads_sets(conn):
+    add(conn, "a1", scan="sa", dhash="d")
+    add(conn, "a2", scan="sa")
+    add(conn, "b1", scan="sb", dhash="d")
+    add(conn, "b2", scan="sb")
+    add(conn, "x", dhash="d")
+    run_group(conn)
+    assert exact_components(conn) == (2, 4, 2)
+    assert exact_components(conn, all_tiers=True) == (1, 5, 4)

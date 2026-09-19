@@ -545,46 +545,29 @@ def sample_groups(conn: Connection, *, limit: int = 20) -> list[list[tuple]]:
 
 
 def exact_components(conn: Connection, *, all_tiers: bool = False) -> tuple[int, int, int]:
-    """Merge overlapping exact-tier groups into connected components.
+    """(sets, assets, removable) over the exact sets, where removable = assets - sets.
 
-    A pair found by two signals sits in two groups; summing per-signal
-    counts would count it twice. Union-find over memberships gives the true
-    (components, assets, removable) where removable = assets - components.
-
-    With *all_tiers* the perceptual `candidate` groups join the same union,
-    which answers "how many assets are implicated in total" rather than "how
-    many are safe to resolve". Nothing in the candidate tier is auto-resolvable.
+    With *all_tiers* the candidate sets join in: a candidate set replaces the
+    exact sets it touches, which answers "how many assets are implicated in
+    total" rather than "how many are safe to resolve".
     """
-    parent: dict[str, str] = {}
-
-    def find(x: str) -> str:
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
-
-    def union(a: str, b: str) -> None:
-        ra, rb = find(a), find(b)
-        if ra != rb:
-            parent[rb] = ra
-
-    rows = conn.execute(
+    one = lambda sql: conn.execute(sql).fetchone()["n"]
+    exact_sets = one("SELECT COUNT(*) AS n FROM dup_set WHERE tier = 'exact'")
+    if not all_tiers:
+        assets = one("SELECT COALESCE(SUM(size), 0) AS n FROM dup_set WHERE tier = 'exact'")
+        return (exact_sets, assets, assets - exact_sets)
+    touched = one(
         """
-        SELECT m.group_id AS gid, m.uuid AS uuid
-        FROM dup_member m JOIN dup_group g ON g.id = m.group_id
-        {where} ORDER BY m.group_id
-        """.format(where="" if all_tiers else "WHERE g.tier = 'exact'")
-    ).fetchall()
-    by_group: dict[int, list[str]] = {}
-    for r in rows:
-        parent.setdefault(r["uuid"], r["uuid"])
-        by_group.setdefault(r["gid"], []).append(r["uuid"])
-    for members in by_group.values():
-        for other in members[1:]:
-            union(members[0], other)
-    roots = {find(u) for u in parent}
-    assets = len(parent)
-    return (len(roots), assets, assets - len(roots))
+        SELECT COUNT(DISTINCT e.set_id) AS n
+        FROM dup_set_member e
+        JOIN dup_set_member c ON c.uuid = e.uuid AND c.tier = 'candidate'
+        WHERE e.tier = 'exact'
+        """
+    )
+    cand_sets = one("SELECT COUNT(*) AS n FROM dup_set WHERE tier = 'candidate'")
+    assets = one("SELECT COUNT(DISTINCT uuid) AS n FROM dup_set_member")
+    components = exact_sets - touched + cand_sets
+    return (components, assets, assets - components)
 
 
 def duplicate_report(conn: Connection) -> str:
