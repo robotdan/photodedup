@@ -1,19 +1,32 @@
 # Photo De-duplication — Working State
 
 **Last updated:** 2026-09-19
-**Current phase:** Phase 2 (hashing, grouping, duplicate report) — BUILD
-COMPLETE and reviewed. Nothing is left to implement. The hash, group and
-duplicate stages have not yet been run end to end against the real catalog.
+**Current phase:** Phase 3 (arbitrate, review report) — BUILD COMPLETE at
+HEAD; not yet run against the real catalog.
 **Branch:** `main`
 **Spec:** docs/superpowers/specs/2026-09-18-photo-dedup-design.md (binding authority)
 **Phase 2 plan:** docs/superpowers/plans/2026-09-19-photo-dedup-phase2-hash-group.md
+**Phase 3 plan:** docs/superpowers/plans/2026-09-19-photo-dedup-phase3-arbitrate-report.md
 
 ## The one outstanding action
 
-Run `photodedup group`, then `photodedup duplicates`, once the hash stage
-reports complete, and record the numbers in the "Phase 2 results" section
-below. `group` now refuses to run against an unfinished hash stage; pass
-`--force` only if you deliberately want numbers over a partial catalog.
+Rebuild the catalog at schema v3 and run the pipeline through `review`, in
+your own terminal (the agent shell cannot start the process pool):
+
+    cd /Users/robotdan/dev/tools
+    rm -f catalog.sqlite catalog.sqlite-shm catalog.sqlite-wal
+    uv run photodedup survey --missing-tolerance 0.05     # ~5 min
+    uv run photodedup hash --workers 4                    # <15 min
+    uv run photodedup group
+    uv run photodedup duplicates
+    uv run photodedup arbitrate
+    uv run photodedup review
+    open reports/review/index.html
+
+Then record the numbers under "Phase 3 results" and compare them with the
+"Expected results on this library" section of the Phase 3 spec. If they
+disagree by more than the prefix rule explains, stop and find out why
+before sampling.
 
 ## Paths
 
@@ -49,6 +62,30 @@ All ten tasks committed: `8ad073c`, `f651d74`, `47238c3`, `f97df79`,
 - [x] Whole-branch review fixes — `a9dbd52`, plus the docs commit that follows it
 
 `uv run pytest -v` passes. Do not re-implement any of it.
+
+**Phase 3 — BUILD COMPLETE at HEAD.** All nine tasks committed:
+
+- [x] Task 1 — schema v3: `dup_set`, `dup_set_member`, `decision`,
+  `decision_loser`, `truncated` hash status, `thumb_path`, stage guard —
+  `6b8a8c4`
+- [x] Task 2 — hash truncated JPEGs leniently and record them as such —
+  `9bb23b6`, fix `510328e`
+- [x] Task 3 — byte-prefix exact rule linking truncated files to intact
+  twins — `9739a04`
+- [x] Task 4 — record the Photos thumbnail path per asset — `6dbec0f`
+- [x] Task 5 — import-stamp sentinel and pooled date choice as the single
+  authority — `7375293`, fix `f2dc19c`
+- [x] Task 6 — merge per-signal groups into exact and candidate sets —
+  `7423f87`
+- [x] Task 7 — arbitrate keeper and capture date per duplicate set —
+  `78c534c`, fix `89dedd6`
+- [x] Task 8 — static HTML review report over the arbitrate decisions —
+  `ad33f31`, fix `be6e50b`
+- [x] Task 9 — `sets`, `arbitrate` and `review` commands; this handoff —
+  this commit
+
+`uv run pytest -q` passes (296 tests). Not yet run against the real
+catalog; see "The one outstanding action" above.
 
 ## Phase 2 results (real run, 2026-09-19)
 
@@ -100,7 +137,10 @@ single-threaded run exactly on every column (status and all hash values,
 The 16 hash-error files were inspected on 2026-09-19; see "Hash-error
 inspection" below. Nothing is outstanding before Phase 3 design.
 
+## Phase 3 results
 
+_Empty on purpose. Fill in from the real run: arbitrate totals, review
+report location, and how the sampled decisions looked._
 
 ## Hash-error inspection (2026-09-19)
 
@@ -156,9 +196,14 @@ numbers to trust.
 
 - `src/photodedup/catalog.py` — SQLite schema and accessors. Tables: `run`,
   `stage`, `asset`, `date_candidate`, `asset_hash`, `dup_group`, `dup_member`,
-  `schema_meta`. `SCHEMA_VERSION` is 2 and `open_catalog` refuses a catalog
-  written by any other version.
+  `dup_set`, `dup_set_member`, `decision`, `decision_loser`, `schema_meta`.
+  `SCHEMA_VERSION` is 3 and `open_catalog` refuses a catalog written by any
+  other version. Also holds `StageIncomplete` / `require_stage_complete`,
+  the guard every stage past `hash` runs through.
 - `src/photodedup/dates.py` — pure date extraction and arbitration, no I/O.
+  Now also holds `IMPORT_STAMPS` (the known wrong-import-time sentinels) and
+  `choose_date_pooled`, the single date authority used by both `arbitrate`
+  and the duplicate report.
 - `src/photodedup/exif.py` — batched exiftool wrapper.
 - `src/photodedup/library.py` — read-only osxphotos adapter. Installs a
   photoscript stub so it works in an agent shell.
@@ -167,8 +212,15 @@ numbers to trust.
   `pixel_hashes`, `video_stream_hash`. FINISHED.
 - `src/photodedup/hash_stage.py` — the parallel resumable hash stage.
 - `src/photodedup/grouping.py` — duplicate group formation. Decides nothing.
+- `src/photodedup/sets.py` — merges per-signal groups into exact and
+  candidate duplicate sets (`run_sets`).
+- `src/photodedup/arbitrate.py` — decides the keeper and capture date per
+  duplicate set (`run_arbitrate`). Writes only to the catalog.
+- `src/photodedup/review.py` — writes the static HTML review report
+  (`write_review`). No JavaScript, no network.
 - `src/photodedup/report.py` — Markdown survey and duplicate reports.
-- `src/photodedup/cli.py` — `survey`, `report`, `hash`, `group`, `duplicates`.
+- `src/photodedup/cli.py` — `survey`, `report`, `hash`, `group`,
+  `duplicates`, `sets`, `arbitrate`, `review`.
 
 ## Running the survey again
 
@@ -224,12 +276,8 @@ design. Do not lose them.
 
 ## Known Phase 2 obligation
 
-`choose_date` in `dates.py` is currently **unused**. Its logic is duplicated in
-the report's SQL, and the two have already drifted: the SQL compares dates with
-no margin while `choose_date` uses a 26-hour `DEFAULT_DISAGREEMENT_MARGIN`.
-Phase 2 must make `choose_date` the single authority and have the report call
-it rather than re-express it in SQL. This was deliberately deferred, not
-overlooked.
+Resolved in Phase 3: `choose_date_pooled` is the single authority; the
+report's SQL copy is gone.
 
 Also deferred deliberately, do not "fix" these without deciding they matter:
 `_EXIF_RE` accepts mismatched separators like `2003:02-23`; `_iter_records`
@@ -293,6 +341,37 @@ and 7 each append a command to `cli.py`, so this phase ran strictly
 sequentially. Phase 1 allowed overlapping implementers only because its
 tasks touched disjoint files.
 
+## Phase 3 progress
+
+Plan: `docs/superpowers/plans/2026-09-19-photo-dedup-phase3-arbitrate-report.md`
+Ledger (gitignored, on disk):
+`.superpowers/sdd/2026-09-19-photo-dedup-phase3-arbitrate-report/progress.md`
+
+Every task is complete; the SHAs are in the Progress section at the top.
+What the reviews established, which the commit messages do not record:
+
+- Truncation is detected STRUCTURALLY. `jpeg_is_truncated` walks the JPEG
+  segments and reports no EOI after SOS; it does not rely on decode
+  failure, because Pillow decodes a zero-padded cut file "successfully".
+  All 15 real damaged JPEGs from the Phase 2 hash-error inspection were
+  confirmed truncated with the right prefix lengths, and the five real
+  motion photos checked alongside them were confirmed intact.
+- Arbitrate treats only `hash_status == 'ok'` as intact. Any other status
+  (`truncated`, `error`, `no_original`, `skipped`) ranks below an intact
+  member for keeper purposes and raises a blocking `unhashed_member` flag
+  rather than being silently preferred.
+
+## Phase 4 obligations
+
+`apply` must key date correction on `decision.date_changes`, never on
+`date_value` alone, because `date_value` is written for every decided set
+and a sub-margin difference there is a timezone rendering, not a
+correction.
+
+`review` refuses to run when `group` was re-run after `arbitrate`, because
+the decisions cascade away with the old sets. The fix is to re-run
+`arbitrate`, not to force past the refusal.
+
 ## The number to watch
 
 The survey found 16,712 groups sharing an exact file size and pixel
@@ -335,6 +414,12 @@ run.
 This is why `sentinel_breakdown` in the report groups by VALUE and not
 just by count. Rejecting these dates is correct; discarding the photos'
 recoverability is not.
+
+## Phase 3 opportunity: an unexplained capture-hour cluster
+
+A third capture-hour cluster, 218 assets at 2023-05-03 01:00 with no EXIF,
+all added within two minutes on 2025-03-12, is unexplained. It is NOT in
+`IMPORT_STAMPS`. Look at it before Phase 4 corrects any dates.
 
 ## Domain decisions
 
@@ -381,13 +466,13 @@ Give the new session this file and nothing else; it names everything.
 4. Do whatever the "Phase 2 results" section says is outstanding. If it is
    still empty, that means `group` and `duplicates` have not been run and
    their numbers not recorded; do that first.
-5. Phase 3 (arbitration, HTML review report, archive, apply, verify) has NO
-   plan yet. It needs a design pass written from the Phase 2 numbers. Use
+5. Phase 3 (arbitrate, review report) is BUILD COMPLETE but has not been run
+   against the real catalog. Do whatever "The one outstanding action" at the
+   top of this file says, then fill in "Phase 3 results". Phase 4 (archive,
+   apply, verify) has no plan yet; write it from the Phase 3 numbers, using
    the brainstorming skill, then writing-plans, then subagent-driven
-   development, as Phases 1 and 2 did. Two obligations carry into it:
-   `choose_date` in `dates.py` must become the single date authority (the
-   report's SQL has already drifted from it), and the motion-photo keeper
-   rule above must be a hard arbitration rule.
+   development, as Phases 1 through 3 did. Its obligations are recorded
+   above under "Phase 4 obligations".
 
 What worked in Phases 1 and 2, keep doing: a fresh subagent per task with
 the plan carrying complete code; a reviewer per task on a mid-tier model,
@@ -413,6 +498,9 @@ Always from the repository root, through uv:
     uv run photodedup hash                              # content hashes; parallel; resumable
     uv run photodedup group                             # form duplicate groups
     uv run photodedup duplicates                        # write reports/duplicates.md
+    uv run photodedup sets                              # rebuild duplicate sets (group does this itself)
+    uv run photodedup arbitrate                         # decide keeper and capture date per set
+    uv run photodedup review                            # write reports/review/index.html
 
 Every command is read-only against the Photos library and writes only to
 `./catalog.sqlite` and `./reports/`. All are safe to interrupt and re-run.

@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 from pathlib import Path
 
 import click
 
-from photodedup.catalog import open_catalog
+from photodedup.arbitrate import run_arbitrate
+from photodedup.catalog import StageIncomplete, open_catalog, require_stage_complete
 from photodedup.grouping import HashStageIncomplete, run_group
 from photodedup.hash_stage import HashStageInterrupted, run_hash
 from photodedup.library import LibraryUnavailable, iter_assets
 from photodedup.report import duplicate_report, survey_report
+from photodedup.review import write_review
+from photodedup.sets import run_sets
 from photodedup.survey import (
     MISSING_ORIGINALS_TOLERANCE,
     MissingOriginalsError,
@@ -111,7 +115,7 @@ def hash(catalog: Path, workers: int | None, limit: int | None) -> None:
         raise click.ClickException(str(exc)) from exc
     click.echo(
         f"{result.total} assets to hash "
-        f"({result.hashed} hashed, {result.no_original} without originals, "
+        f"({result.hashed} hashed, {result.truncated} truncated, {result.no_original} without originals, "
         f"{result.errors} errors); {result.already_done} already complete"
     )
 
@@ -134,9 +138,8 @@ def group(catalog: Path, force: bool) -> None:
         raise click.ClickException(str(exc)) from exc
     click.echo(
         f"{result.groups} groups covering {result.members} assets; "
-        f"{result.removable} removable if every group keeps one (per signal, "
-        f"over-counts pairs found twice; see `photodedup duplicates` for the "
-        f"de-duplicated count)"
+        f"{result.exact_sets} exact sets, {result.candidate_sets} candidate sets "
+        f"(see `photodedup duplicates` for removable counts)"
     )
 
 
@@ -156,3 +159,69 @@ def duplicates(catalog: Path, out: Path) -> None:
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(duplicate_report(conn))
     click.echo(f"wrote {out}")
+
+
+@main.command()
+@click.option(
+    "--catalog", type=click.Path(path_type=Path), default=DEFAULT_CATALOG, show_default=True
+)
+@click.option("--force", is_flag=True, help="Rebuild sets even though the group stage has not reported complete.")
+def sets(catalog: Path, force: bool) -> None:
+    """Rebuild duplicate sets from the groups. `group` does this itself; use
+    this after a manual fix to the groups."""
+    conn = open_catalog(catalog)
+    try:
+        require_stage_complete(conn, "group", force=force)
+    except StageIncomplete as exc:
+        raise click.ClickException(str(exc)) from exc
+    result = run_sets(conn)
+    click.echo(
+        f"{result.exact_sets} exact sets over {result.exact_assets} assets; "
+        f"{result.candidate_sets} candidate sets over {result.candidate_assets} assets"
+    )
+
+
+@main.command()
+@click.option(
+    "--catalog", type=click.Path(path_type=Path), default=DEFAULT_CATALOG, show_default=True
+)
+@click.option(
+    "--margin-hours", type=float, default=26.0, show_default=True,
+    help="Dates closer than this are one date rendered in two timezones, not a conflict.",
+)
+@click.option("--force", is_flag=True, help="Arbitrate even though the group stage has not reported complete.")
+def arbitrate(catalog: Path, margin_hours: float, force: bool) -> None:
+    """Decide the keeper and capture date for every duplicate set. Writes only
+    to the catalog; re-run freely after changing rules."""
+    conn = open_catalog(catalog)
+    try:
+        result = run_arbitrate(conn, margin=timedelta(hours=margin_hours), force=force)
+    except StageIncomplete as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(
+        f"{result.sets} sets: {result.resolvable} resolvable, {result.review} need review, "
+        f"{result.dates_rescued} dates rescued"
+    )
+
+
+@main.command()
+@click.option(
+    "--catalog", type=click.Path(path_type=Path), default=DEFAULT_CATALOG, show_default=True
+)
+@click.option(
+    "--out", type=click.Path(path_type=Path), default=Path("reports/review"), show_default=True
+)
+@click.option("--per-page", type=int, default=250, show_default=True)
+@click.option("--sample", type=int, default=300, show_default=True, help="Sets per sampled section.")
+@click.option("--force", is_flag=True, help="Write the report even though arbitrate has not reported complete.")
+def review(catalog: Path, out: Path, per_page: int, sample: int, force: bool) -> None:
+    """Write the static HTML review report. Open <out>/index.html in a browser."""
+    conn = open_catalog(catalog)
+    try:
+        result = write_review(conn, out, per_page=per_page, sample=sample, force=force)
+    except StageIncomplete as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(
+        f"wrote {out / 'index.html'}: {result.sets} sets on {result.pages} pages, "
+        f"{result.thumbs} thumbnails, {result.placeholders} placeholders"
+    )
