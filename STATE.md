@@ -268,3 +268,56 @@ recoverability is not.
   photoscript stub, since Phase 1 is read-only. It must be re-checked before
   any later `apply` stage that calls osxphotos functions needing photoscript
   from within an agent shell.
+
+## How to resume in a new session
+
+Give the new session this file and nothing else; it names everything.
+
+1. Read this file top to bottom, then the spec at
+   `docs/superpowers/specs/2026-09-18-photo-dedup-design.md`, especially its
+   "Survey findings (2026-09-19)" and "Motion photos" subsections, which
+   amend the original design with what the library actually contains.
+2. Confirm the tree: `git log --oneline -5`, `git status` (should be clean),
+   `uv run pytest -q` (all green).
+3. Check the catalog matches this file's claims:
+   `uv run python -c "import sqlite3;c=sqlite3.connect('catalog.sqlite');print(c.execute('SELECT name,status,notes FROM stage').fetchall())"`
+   If the `hash` stage is not `complete`, resume it with `uv run photodedup hash`
+   before anything else; it picks up where it stopped.
+4. Do whatever the "Phase 2 results" section says is outstanding. If it is
+   still empty, that means `group` and `duplicates` have not been run and
+   their numbers not recorded; do that first.
+5. Phase 3 (arbitration, HTML review report, archive, apply, verify) has NO
+   plan yet. It needs a design pass written from the Phase 2 numbers. Use
+   the brainstorming skill, then writing-plans, then subagent-driven
+   development, as Phases 1 and 2 did. Two obligations carry into it:
+   `choose_date` in `dates.py` must become the single date authority (the
+   report's SQL has already drifted from it), and the motion-photo keeper
+   rule above must be a hard arbitration rule.
+
+What worked in Phases 1 and 2, keep doing: a fresh subagent per task with
+the plan carrying complete code; a reviewer per task on a mid-tier model,
+instructed to HUNT for false positives rather than confirm the happy path;
+the final whole-branch review on the most capable model. The reviews caught
+a real defect roughly every other task, several of which would have deleted
+photos wrongly. Every fix round so far traced to a defect in the brief, not
+the implementer, so cheap implementers are fine when the plan is complete.
+
+Process gotchas in an agent shell: `ProcessPoolExecutor` cannot start
+(semaphore PermissionError), `ps` and `/Volumes` are blocked, and osxphotos
+needs the `photoscript` stub in `library.py` to import at all. None of
+these affect the user's own terminal.
+
+## Running the tool
+
+Always from the repository root, through uv:
+
+    cd /Users/robotdan/dev/tools
+    uv run photodedup --help
+    uv run photodedup survey --missing-tolerance 0.05   # read the library into the catalog
+    uv run photodedup report                            # write reports/survey.md
+    uv run photodedup hash                              # content hashes; parallel; resumable
+    uv run photodedup group                             # form duplicate groups
+    uv run photodedup duplicates                        # write reports/duplicates.md
+
+Every command is read-only against the Photos library and writes only to
+`./catalog.sqlite` and `./reports/`. All are safe to interrupt and re-run.
