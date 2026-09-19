@@ -305,6 +305,76 @@ functions over candidate sets, with no filesystem involved.
    If found, they materially improve outcomes for cohort A assets that have no
    duplicate twin. The pipeline does not block on this.
 
+## Survey findings (2026-09-19) — amends the assumptions above
+
+Phase 1 ran against the live library. These measurements correct or confirm
+assumptions this design was written on, and Phase 2 must be built on them
+rather than on the original text.
+
+**The scale of the damage is far smaller than assumed.** Clustering the
+CAPTURE date, which is the measurement that isolates collapsed dates,
+finds exactly two affected batches in 65,974 assets: 403 assets stamped
+2020-12-18 09:00 and 226 stamped 2023-01-14 11:00. 629 photos in total.
+The December 2020 import moved roughly 34,000 assets and the large
+majority kept their true dates. Clustering `date_added` instead, as
+originally proposed, marks every bulk import including the good ones and
+does not isolate anything.
+
+**The `at_or_after_date_added` rule does not do what this design claims.**
+It was described as eliminating the cohort A dates on its own. It rejects
+4,611 of 65,974 Photos-database candidates, and only 22 of the 403 assets
+in the 2020 collapsed batch. The bad import stamped capture dates at
+09:10-09:24 while the rows finished being added between 11:53 and 23:00,
+so the wrong date precedes its own `date_added` and survives the filter.
+The rule is still correct where it fires. It is not a cohort detector.
+
+**Recovery is mostly impossible for the affected photos.** Of the 403
+assets in the 2020 batch, 31 carry a usable EXIF date. Of the 226 in the
+2023 batch, none do. Neither batch has any usable filename date, and all
+of them have local originals, so this is not a download gap. With the
+Google Takeout archives gone, roughly 598 photos have no mechanical
+recovery path and will keep a wrong date unless identified by hand.
+
+**The library is otherwise healthy.** 56,833 assets carry a usable EXIF
+capture date. Only 115 assets have a real conflict, where EXIF and the
+Photos date are both usable and differ by more than 26 hours. 19,352
+differ by timezone-sized amounts, which is a rendering artifact rather
+than corruption; 679 assets have a capture date later than their own
+`date_added` by under 24 hours for the same reason. 4,633 assets have
+neither source usable.
+
+**`takeout_json` is a dead source.** The user confirmed the original
+Takeout archives no longer exist. The rung remains in `SOURCE_RANK` and
+in the schema because it is the correct top of the trust ladder in
+principle, but no candidate will ever be written for it.
+
+**Duplicate volume, as a floor.** 16,712 groups share an exact file size
+and pixel dimensions, covering 33,513 assets, implying at least 16,801
+removable duplicates. This is a floor rather than an estimate: any pair
+whose EXIF was rewritten differs in byte size and cannot appear in it.
+Separately, 4,528 filenames carry Google's `(N)` disambiguation suffix.
+
+**Hashing workload.** 57,114 JPEG (132.9 GB) and 6,678 HEIC (14.8 GB)
+dominate by count; 1,719 videos dominate by size at 141.6 GB. 1,875
+assets have no local original and cannot be hashed at all — all of them
+were added in 2025 or 2026, none belong to either collapsed batch.
+
+**Apple's duplicate detection is readable.** `ZASSET.ZDUPLICATEMETADATA
+MATCHINGALBUM` and `ZASSET.ZDUPLICATEPERCEPTUALMATCHINGALBUM` act as
+group keys, with perceptual fingerprints in `ZSCENEPRINT.ZDUPLICATE
+MATCHINGDATA`. Undocumented internal schema, so advisory only.
+
+**A new recovery technique, not in the original design.** A camera whose
+clock resets returns to its epoch and keeps counting, so within such a
+run the intervals between photos stay accurate and only the origin is
+wrong. This library contains one: 73 photos on the 2001 epoch from a
+Fujifilm FinePix2800ZOOM, which the user identified as Chicago on 3
+August 2002. Runs like this are correctable by shifting every member by
+one constant offset derived from a single anchor. Phase 2 should detect
+them: a contiguous run from one camera model starting at a known sentinel
+epoch with monotonically increasing timestamps, bracketed by correctly
+dated photos from the same camera.
+
 ## Risks
 
 - iCloud originals not fully downloaded at run time would cause hashing of
