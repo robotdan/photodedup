@@ -375,6 +375,31 @@ them: a contiguous run from one camera model starting at a known sentinel
 epoch with monotonically increasing timestamps, bracketed by correctly
 dated photos from the same camera.
 
+### Motion photos (found in Phase 2 review)
+
+358 `MVIMG_*` files exist in this library. A Google motion photo is a JPEG
+with an MP4 appended after the EOI marker. `jpeg_scan_hash` stops at EOI by
+design, so a motion photo and a copy whose trailer has been stripped are
+exact-identical by scan hash. That is correct for GROUPING — the photograph
+really is the same photograph — and it is exactly wrong for ARBITRATION,
+because one member still carries a video and the other has lost it.
+
+**The arbitration rule for Phase 3: within an exact group, prefer the member
+with the larger `file_size`; never delete the larger member in favour of a
+smaller one.** The duplicate report surfaces these as "exact groups whose
+members differ by >=1 MB" and prints a per-group size spread under each
+sample group, so a group where the rule matters is visible before anything
+is deleted.
+
+`pixel_hashes` collapses alpha via `convert("RGB")`, so a fully transparent
+PNG and an opaque one of the same RGB hash identically; acceptable for
+photographs, and PNG groups should be reviewed rather than auto-resolved.
+
+Related: animated GIF and WebP are excluded from the `exact` tier entirely
+(`MULTIFRAME_UTIS` in `grouping.py`), because `pixel_hashes` decodes frame 0
+only and two different animations can share a first frame. They still form
+`candidate` groups for human review.
+
 ## Risks
 
 - iCloud originals not fully downloaded at run time would cause hashing of

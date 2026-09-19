@@ -1,80 +1,104 @@
 # Photo De-duplication — Working State
 
 **Last updated:** 2026-09-19
-**Current phase:** Phase 1 (foundation and survey) — CODE COMPLETE, survey not yet run
-**Branch:** `phase1-survey`
-**Plan:** docs/superpowers/plans/2026-09-18-photo-dedup-phase1-survey.md
+**Current phase:** Phase 2 (hashing, grouping, duplicate report) — BUILD
+COMPLETE and reviewed. Nothing is left to implement. The hash, group and
+duplicate stages have not yet been run end to end against the real catalog.
+**Branch:** `main`
 **Spec:** docs/superpowers/specs/2026-09-18-photo-dedup-design.md (binding authority)
+**Phase 2 plan:** docs/superpowers/plans/2026-09-19-photo-dedup-phase2-hash-group.md
+
+## The one outstanding action
+
+Run `photodedup group`, then `photodedup duplicates`, once the hash stage
+reports complete, and record the numbers in the "Phase 2 results" section
+below. `group` now refuses to run against an unfinished hash stage; pass
+`--force` only if you deliberately want numbers over a partial catalog.
 
 ## Paths
 
-- Library: /Users/robotdan/Pictures/Photos Library.photoslibrary (65,971 assets)
-- Catalog: ./catalog.sqlite (gitignored, not yet created)
-- Archive: /Volumes/Extreme Pro (unused in Phase 1)
+- Library: /Users/robotdan/Pictures/Photos Library.photoslibrary (65,974 assets)
+- Catalog: ./catalog.sqlite — schema version 2, all 65,974 assets surveyed.
+  Gitignored and derived; rebuilding it is the correct answer to a schema
+  change, not something to work around.
+- Archive: /Volumes/Extreme Pro (unused so far)
 
-## Phase 1 is READ-ONLY
+## Everything is READ-ONLY
 
-Nothing in Phase 1 may write to the Photos library, launch Photos.app, or
-modify anything inside the `.photoslibrary` bundle. Reading `Photos.sqlite`
-directly is fine. No mutating osxphotos call is permitted anywhere in this
-phase.
+Nothing in Phase 1 or Phase 2 may write to the Photos library, launch
+Photos.app, or modify anything inside the `.photoslibrary` bundle. Reading
+`Photos.sqlite` directly is fine. No mutating osxphotos call is permitted.
 
-## Progress — all nine tasks complete and committed
+## Progress
 
-- [x] Task 0: Spikes — `8ad073c`
-- [x] Task 1: Project scaffold — `f651d74`
-- [x] Task 2: Catalog schema — `47238c3`
-- [x] Task 3: Date parsing — `f97df79`
-- [x] Task 4: Plausibility and selection — `aef7767`
-- [x] Task 5: exiftool batch wrapper — `378e1b2`
-- [x] Task 6: Photos library adapter — `0902a2a`, fixed by `4f7c2d9`, `e14cd2a`, `05cae91`
-- [x] Task 7: Survey orchestration — `3e6f2f1`
-- [x] Task 8: Survey report and CLI — `f51c4c1`
-- [x] Task 9: Whole-branch review fixes — `89a42b2`
+**Phase 1 — COMPLETE, and its survey has been run against the live library.**
+All ten tasks committed: `8ad073c`, `f651d74`, `47238c3`, `f97df79`,
+`aef7767`, `378e1b2`, `0902a2a` (fixed by `4f7c2d9`, `e14cd2a`, `05cae91`),
+`3e6f2f1`, `f51c4c1`, review fixes `89a42b2`. The design document is
+`d77d805`. `reports/survey.md` holds the results.
 
-The design document itself is `d77d805`.
+**Phase 2 — BUILD COMPLETE at HEAD.** All seven tasks committed:
 
-**The branch is not a scaffold.** Every module below exists, is tested, and
+- [x] Task 1 — `asset_hash`, `dup_group`, `dup_member` at schema v2 — `6de0891`
+- [x] Task 2 — `jpeg_scan_hash` — `a34f4b2`, fix `97c72e4`
+- [x] Task 3 — `pixel_hashes` (decoded pixels, dhash, phash) — `07478d7`
+- [x] Task 4 — `video_stream_hash` — `3fcd683`
+- [x] Task 5 — `hash_stage.py` and `photodedup hash` — `4d0c0af`
+- [x] Task 6 — `grouping.py` and `photodedup group` — `e9c8d91`
+- [x] Task 7 — duplicate report and `photodedup duplicates` — `8393d07`
+- [x] Whole-branch review fixes — `a9dbd52`, plus the docs commit that follows it
+
 `uv run pytest -v` passes. Do not re-implement any of it.
+
+## Phase 2 results (to be filled after the real run)
+
+_Empty on purpose._ Fill this in with the output of `photodedup group` and
+`photodedup duplicates` once the hash stage completes: total groups, members,
+removable de-duplicated across signals, the coverage table, and how the
+number compares with the 16,801 floor described under "The number to watch".
 
 ## Modules
 
 - `src/photodedup/catalog.py` — SQLite schema and accessors. Tables: `run`,
-  `stage`, `asset`, `date_candidate`, `schema_meta`. `open_catalog` creates and
-  migrates. `set_run`/`get_run` hold the cutoff watermark; `set_stage`/
-  `get_stage` track pipeline progress.
+  `stage`, `asset`, `date_candidate`, `asset_hash`, `dup_group`, `dup_member`,
+  `schema_meta`. `SCHEMA_VERSION` is 2 and `open_catalog` refuses a catalog
+  written by any other version.
 - `src/photodedup/dates.py` — pure date extraction and arbitration, no I/O.
-  EXIF and filename parsing, `SOURCE_RANK` (the trust ladder), `SENTINEL_DATES`
-  with per-entry windows, `rejection_reason`, `choose_date`.
-- `src/photodedup/exif.py` — batched exiftool wrapper, returns tags per path
-  and surfaces `ExifTool:Error` / `ExifTool:Warning`.
-- `src/photodedup/library.py` — read-only osxphotos adapter yielding
-  `AssetRecord`. Installs a photoscript stub so it works in an agent shell.
-- `src/photodedup/survey.py` — orchestration. Resumable, idempotent, batched.
-  Writes one `asset` row and up to five `date_candidate` rows per asset.
-- `src/photodedup/report.py` — Markdown survey report over the catalog.
-- `src/photodedup/cli.py` — `photodedup survey` and `photodedup report`.
+- `src/photodedup/exif.py` — batched exiftool wrapper.
+- `src/photodedup/library.py` — read-only osxphotos adapter. Installs a
+  photoscript stub so it works in an agent shell.
+- `src/photodedup/survey.py` — survey orchestration. Resumable, idempotent.
+- `src/photodedup/hashing.py` — pure hashing: `jpeg_scan_hash`,
+  `pixel_hashes`, `video_stream_hash`. FINISHED.
+- `src/photodedup/hash_stage.py` — the parallel resumable hash stage.
+- `src/photodedup/grouping.py` — duplicate group formation. Decides nothing.
+- `src/photodedup/report.py` — Markdown survey and duplicate reports.
+- `src/photodedup/cli.py` — `survey`, `report`, `hash`, `group`, `duplicates`.
 
-Beyond the original plan, the `asset` table carries an **`exif_error`** column
-holding the exiftool error or warning string, so damaged files are countable
-rather than silently date-less.
-
-## The only outstanding Phase 1 action
-
-Run the real survey, then the report:
+## Running the survey again
 
 ```
-uv run photodedup survey
+uv run photodedup survey --missing-tolerance 0.05
 uv run photodedup report
 ```
 
-This is **gated on the user confirming** that Photos → Settings → iCloud →
-"Download Originals to this Mac" is selected and the download has finished.
-Assets without local originals yield no EXIF, and EXIF is the only remaining
-recovery path (see below). The survey aborts if more than 1% of in-scope
-assets lack a local original.
+The `--missing-tolerance` flag is required. 1,875 assets have no local
+original; every one was added in 2025 or 2026 and none belongs to either
+damaged batch, so they do not bear on the date question. They cannot be
+hashed and are recorded as `no_original`. The default tolerance of 1% would
+refuse the run.
 
-Do not run the survey against the live library without that confirmation.
+## Phase 1 result, in one paragraph
+
+65,974 assets surveyed in about five minutes, zero errors. 56,833 carry a
+usable EXIF capture date. Only two batches in the whole library had their
+capture dates overwritten with import time: 403 assets stamped
+2020-12-18 09:00 and 226 stamped 2023-01-14 11:00, so 629 photos in total
+rather than the thousands originally feared. Of those, 31 still carry a
+usable EXIF date, all in the 2020 batch; the 2023 batch has none. With the
+Google Takeout archives gone, roughly 598 photos have no mechanical recovery
+path. 79 files are damaged (exiftool reports a format error rather than
+merely absent EXIF) and are worth inspecting separately.
 
 ## What the final review measured against the real library
 
@@ -88,7 +112,7 @@ design. Do not lose them.
 - **The spec's `at_or_after_date_added` assumption is FALSE on this library.**
   The spec assumes rejecting candidates at or after `date_added` eliminates
   cohort A. It does not: it catches 22 of 415 cohort A assets, and 4,611 of
-  65,971 library-wide. The bad import stamped capture dates at 09:10–09:24
+  65,974 library-wide. The bad import stamped capture dates at 09:10–09:24
   while `date_added` spread across 11:53 to 23:00, so the wrong date sits
   *before* its own `date_added` and survives the rule. **Phase 2's rule set
   must not be built on that assumption.** Capture-date clustering over
@@ -120,9 +144,9 @@ when no record has a `date_added`.
 ## Spike status
 
 - **Spike 1 — osxphotos works outside sandbox: CLOSED, YES.**
-  `osxphotos query --count` → 65971. Inside an agent-spawned shell it fails at
+  `osxphotos query --count` → 65974. Inside an agent-spawned shell it fails at
   `import photoscript` because AppleScript compilation needs a GUI session.
-  `library.py` installs a read-only-safe photoscript stub. 65,971 assets load
+  `library.py` installs a read-only-safe photoscript stub. 65,974 assets load
   in ~13s.
 - **Spike 2 — `osxphotos timewarp` can set dates: OPEN, user-owned.**
   Requires creating throwaway photos in Photos.app, selecting one in the GUI,
@@ -138,82 +162,43 @@ when no record has a `date_added`.
   `SOURCE_RANK` still list it because it is the correct top of the trust ladder
   in principle, but no candidate will ever be written for it. Spend no effort
   on it.
-- **Spike 5 — iCloud originals fully downloaded: OPEN, user-owned.** Blocks the
-  real survey run only. See "The only outstanding Phase 1 action" above.
+- **Spike 5 — iCloud originals fully downloaded: CLOSED for Phase 1.** The
+  survey ran; 1,875 assets have no local original, all added in 2025 or 2026,
+  and they are recorded as `no_original` rather than hashed.
 
-## Where this stands (updated 2026-09-19)
-
-Phase 1 is COMPLETE and its survey has been run against the live library.
-`reports/survey.md` holds the results. Phase 2 is IN PROGRESS.
-
-### Phase 1 result, in one paragraph
-
-65,974 assets surveyed in about five minutes, zero errors. 56,833 carry a
-usable EXIF capture date. Only two batches in the whole library had their
-capture dates overwritten with import time: 403 assets stamped
-2020-12-18 09:00 and 226 stamped 2023-01-14 11:00, so 629 photos in total
-rather than the thousands originally feared. Of those, 31 still carry a
-usable EXIF date, all in the 2020 batch; the 2023 batch has none. With the
-Google Takeout archives gone, roughly 598 photos have no mechanical
-recovery path. 79 files are damaged (exiftool reports a format error
-rather than merely absent EXIF) and are worth inspecting separately.
-
-### Running it again
-
-```
-uv run photodedup survey --missing-tolerance 0.05
-uv run photodedup report
-```
-
-The `--missing-tolerance` flag is required. 1,875 assets have no local
-original; every one was added in 2025 or 2026 and none belongs to either
-damaged batch, so they do not bear on the date question. They cannot be
-hashed and are recorded as `no_original`. The default tolerance of 1%
-would refuse the run.
-
-The catalog at `./catalog.sqlite` is derived and gitignored. Deleting and
-rebuilding it is the correct response to a schema change, not something
-to work around. A `SchemaVersionMismatch` on open means exactly that.
-
-### Phase 2 progress
+## Phase 2 progress
 
 Plan: `docs/superpowers/plans/2026-09-19-photo-dedup-phase2-hash-group.md`
 Ledger (gitignored, on disk):
 `.superpowers/sdd/2026-09-19-photo-dedup-phase2-hash-group/progress.md`
 
-- Task 1 COMPLETE (`6de0891`) — `asset_hash`, `dup_group`, `dup_member`
-  tables at schema version 2, plus a guard that refuses to open a catalog
-  written by a different version. Reviewed clean. The catalog has been
-  rebuilt at version 2 with all 65,974 assets.
-- Task 2 COMPLETE (`a34f4b2`, fix `97c72e4`) — `jpeg_scan_hash`. Reviewed
-  clean after one fix round (EOI search made forward so bytes appended after
-  a file's EOI cannot break a match). Adversarial collision hunt found no
-  false positives. On the re-imported cohort the scan hash merges 66 groups
-  that whole-file SHA-256 splits, recovering 67 assets, all 66 groups decoded
-  to pixel-identical images. THE PREMISE IS CONFIRMED ON THIS LIBRARY.
-- Task 3 COMPLETE (`07478d7`) — `pixel_hashes` (decoded-pixel SHA-256 with
-  dimensions mixed in, plus dhash/phash), orientation normalised via
-  `exif_transpose`, HEIC decoding verified on real files. Reviewed clean.
-- Task 4 COMPLETE (`3fcd683`) — `video_stream_hash` via
-  `ffmpeg -map 0:v -c copy -f md5`. Reviewed clean, no findings. Real
-  throughput ~780 MB/s, so all 141.6 GB of video hashes in ~3 minutes.
-- `src/photodedup/hashing.py` IS NOW FINISHED. This is a clean handoff point.
-- Task 5 NOT STARTED — `hash_stage.py`, the parallel resumable stage that
-  writes `asset_hash` rows, plus `photodedup hash` in cli.py.
-- Task 6 NOT STARTED — `grouping.py` and `photodedup group`.
-- Task 7 NOT STARTED — duplicate report and `photodedup duplicates`; ends
-  with the real run and recording the numbers here.
+Every task is complete; the SHAs are in the Progress section at the top.
+What the tasks established, which the commit messages do not record:
 
-Deferred minors for the final review's fix wave: the brief's
-`test_exif_orientation_is_normalised` sets Orientation=1 on both files and so
-cannot fail; replace with an asymmetric image and a real rotation.
+- Task 2 — the scan hash premise is CONFIRMED ON THIS LIBRARY. On the
+  re-imported cohort it merges 66 groups that whole-file SHA-256 splits,
+  recovering 67 assets, and all 66 decoded to pixel-identical images. An
+  adversarial collision hunt found no false positives.
+- Task 3 — orientation is normalised via `exif_transpose`; HEIC decoding
+  verified on real files.
+- Task 4 — real ffmpeg throughput ~780 MB/s, so all 141.6 GB of video hashes
+  in about three minutes.
+- Task 6 — animated GIF and WebP are excluded from the `exact` tier
+  (`MULTIFRAME_UTIS`), because `pixel_hashes` decodes frame 0 only.
+- Task 7 — the duplicate report leads with a coverage table, so a report over
+  a half-finished hash stage cannot be mistaken for a final one.
+
+Before the first full parallel run in your own terminal, run
+`photodedup hash --workers 4 --limit 2000` on a fresh catalog copy and
+compare row/error counts with `--workers 1`; the pool branch was unexercised
+in the agent environment.
 
 Tasks 2, 3 and 4 all append to `src/photodedup/hashing.py`, and Tasks 5, 6
-and 7 each append a command to `cli.py`, so this phase must run strictly
+and 7 each append a command to `cli.py`, so this phase ran strictly
 sequentially. Phase 1 allowed overlapping implementers only because its
 tasks touched disjoint files.
 
-### The number to watch
+## The number to watch
 
 The survey found 16,712 groups sharing an exact file size and pixel
 dimensions, implying at least 16,801 removable duplicates. That is a floor,
