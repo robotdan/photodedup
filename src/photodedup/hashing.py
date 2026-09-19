@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -125,3 +126,30 @@ def pixel_hashes(path: Path) -> PixelHashes | None:
             )
     except Exception:
         return None
+
+
+def video_stream_hash(
+    path: Path, *, ffmpeg: str = "ffmpeg", timeout: int = 600
+) -> str | None:
+    """Hash a video's encoded picture stream, ignoring container metadata.
+
+    `-c copy` avoids re-encoding, so this runs at IO speed rather than CPU
+    speed, which matters across 141 GB of video. Mapping only `0:v` means an
+    added or re-ordered audio track does not change the result.
+    """
+    try:
+        completed = subprocess.run(
+            [ffmpeg, "-nostdin", "-v", "error", "-i", str(path),
+             "-map", "0:v", "-c", "copy", "-f", "md5", "-"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if completed.returncode != 0:
+        return None
+    output = completed.stdout.strip()
+    if not output.startswith("MD5="):
+        return None
+    return output[len("MD5=") :]
