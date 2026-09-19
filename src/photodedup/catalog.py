@@ -6,7 +6,7 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 DATE_SOURCES = ("takeout_json", "exif", "filename", "photos_db", "file_mtime")
 
@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS asset (
     height            INTEGER,
     file_size         INTEGER,
     path              TEXT,
+    thumb_path        TEXT,
     date_added        TEXT,
     photos_date       TEXT,
     photos_tz_offset  INTEGER,
@@ -78,7 +79,7 @@ CREATE TABLE IF NOT EXISTS date_candidate (
 
 CREATE TABLE IF NOT EXISTS asset_hash (
     uuid         TEXT PRIMARY KEY REFERENCES asset (uuid) ON DELETE CASCADE,
-    status       TEXT NOT NULL CHECK (status IN ('ok', 'error', 'no_original', 'skipped')),
+    status       TEXT NOT NULL CHECK (status IN ('ok', 'error', 'no_original', 'skipped', 'truncated')),
     error        TEXT,
     scan_hash    TEXT,
     pixel_hash   TEXT,
@@ -99,7 +100,7 @@ CREATE INDEX IF NOT EXISTS asset_hash_dhash ON asset_hash (dhash);
 
 CREATE TABLE IF NOT EXISTS dup_group (
     id     INTEGER PRIMARY KEY,
-    signal TEXT NOT NULL CHECK (signal IN ('scan', 'pixel', 'video', 'dhash')),
+    signal TEXT NOT NULL CHECK (signal IN ('scan', 'pixel', 'video', 'dhash', 'prefix')),
     tier   TEXT NOT NULL CHECK (tier IN ('exact', 'candidate')),
     digest TEXT NOT NULL,
     size   INTEGER NOT NULL
@@ -113,6 +114,49 @@ CREATE TABLE IF NOT EXISTS dup_member (
 
 CREATE INDEX IF NOT EXISTS dup_member_uuid ON dup_member (uuid);
 CREATE INDEX IF NOT EXISTS dup_group_tier ON dup_group (tier, signal);
+
+CREATE TABLE IF NOT EXISTS dup_set (
+    id       INTEGER PRIMARY KEY,
+    tier     TEXT NOT NULL CHECK (tier IN ('exact', 'candidate')),
+    kind     TEXT NOT NULL,
+    size     INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS dup_set_member (
+    set_id   INTEGER NOT NULL REFERENCES dup_set (id) ON DELETE CASCADE,
+    uuid     TEXT NOT NULL REFERENCES asset (uuid) ON DELETE CASCADE,
+    tier     TEXT NOT NULL CHECK (tier IN ('exact', 'candidate')),
+    signals  TEXT NOT NULL,
+    PRIMARY KEY (set_id, uuid)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS dup_set_member_exact
+    ON dup_set_member (uuid) WHERE tier = 'exact';
+CREATE INDEX IF NOT EXISTS dup_set_member_uuid ON dup_set_member (uuid);
+CREATE INDEX IF NOT EXISTS dup_set_tier ON dup_set (tier);
+
+CREATE TABLE IF NOT EXISTS decision (
+    set_id         INTEGER PRIMARY KEY REFERENCES dup_set (id) ON DELETE CASCADE,
+    keeper_uuid    TEXT NOT NULL REFERENCES asset (uuid),
+    keeper_reason  TEXT NOT NULL,
+    date_value     TEXT,
+    date_source    TEXT,
+    date_rejected  TEXT,
+    date_changes   INTEGER NOT NULL,
+    resolvable     INTEGER NOT NULL,
+    review_flags   TEXT NOT NULL,
+    decided_at     TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS decision_resolvable ON decision (resolvable);
+
+CREATE TABLE IF NOT EXISTS decision_loser (
+    set_id   INTEGER NOT NULL REFERENCES dup_set (id) ON DELETE CASCADE,
+    uuid     TEXT NOT NULL REFERENCES asset (uuid),
+    lost_on  TEXT NOT NULL,
+    carries  TEXT NOT NULL,
+    PRIMARY KEY (set_id, uuid)
+);
 """
 
 
@@ -183,3 +227,28 @@ def set_stage(
 
 def get_stage(conn: sqlite3.Connection, name: str) -> sqlite3.Row | None:
     return conn.execute("SELECT * FROM stage WHERE name = ?", (name,)).fetchone()
+
+
+class StageIncomplete(RuntimeError):
+    """A stage was asked to run before the stage it depends on finished."""
+
+
+def require_stage_complete(
+    conn: sqlite3.Connection, name: str, *, force: bool = False
+) -> None:
+    """Refuse unless stage *name* has reported complete, or *force* is set.
+
+    Every stage after `hash` builds numbers that look final. Running one over
+    a half-finished predecessor produces a report nobody can tell apart from
+    a real one, so the default is to refuse and say why.
+    """
+    if force:
+        return
+    stage = get_stage(conn, name)
+    status = stage["status"] if stage is not None else "never run"
+    if status != "complete":
+        raise StageIncomplete(
+            f"the {name} stage is '{status}', not 'complete'. Finish "
+            f"`photodedup {name}` first, or pass --force if you deliberately "
+            "want results over a partial catalog."
+        )

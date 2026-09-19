@@ -5,9 +5,11 @@ import pytest
 from photodedup.catalog import (
     SCHEMA_VERSION,
     SchemaVersionMismatch,
+    StageIncomplete,
     get_run,
     get_stage,
     open_catalog,
+    require_stage_complete,
     set_run,
     set_stage,
 )
@@ -110,8 +112,8 @@ def test_asset_hash_is_one_row_per_asset(conn):
         conn.execute("INSERT INTO asset_hash (uuid, status) VALUES ('u1', 'ok')")
 
 
-def test_schema_version_is_two(conn):
-    assert SCHEMA_VERSION == 2
+def test_schema_version_is_three(conn):
+    assert SCHEMA_VERSION == 3
 
 
 def test_version_mismatch_is_refused(tmp_path):
@@ -124,3 +126,89 @@ def test_version_mismatch_is_refused(tmp_path):
     with pytest.raises(SchemaVersionMismatch) as excinfo:
         open_catalog(path)
     assert "re-run the survey" in str(excinfo.value)
+
+
+def test_schema_version_is_3():
+    assert SCHEMA_VERSION == 3
+
+
+def test_phase3_tables_exist(conn):
+    tables = {
+        row["name"]
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+    assert {"dup_set", "dup_set_member", "decision", "decision_loser"} <= tables
+
+
+def test_asset_has_thumb_path(conn):
+    conn.execute("INSERT INTO asset (uuid, thumb_path) VALUES ('u1', '/x/thumb.jpg')")
+    row = conn.execute("SELECT thumb_path FROM asset WHERE uuid='u1'").fetchone()
+    assert row["thumb_path"] == "/x/thumb.jpg"
+
+
+def test_truncated_is_a_valid_hash_status(conn):
+    conn.execute("INSERT INTO asset (uuid) VALUES ('u1')")
+    conn.execute("INSERT INTO asset_hash (uuid, status) VALUES ('u1', 'truncated')")
+
+
+def test_prefix_is_a_valid_group_signal(conn):
+    conn.execute(
+        "INSERT INTO dup_group (signal, tier, digest, size) VALUES ('prefix', 'exact', 'd', 2)"
+    )
+
+
+def test_asset_in_two_exact_sets_is_rejected(conn):
+    conn.execute("INSERT INTO asset (uuid) VALUES ('u1')")
+    conn.execute("INSERT INTO dup_set (id, tier, kind, size) VALUES (1, 'exact', 'image', 2)")
+    conn.execute("INSERT INTO dup_set (id, tier, kind, size) VALUES (2, 'exact', 'image', 2)")
+    conn.execute("INSERT INTO dup_set_member VALUES (1, 'u1', 'exact', 'scan')")
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("INSERT INTO dup_set_member VALUES (2, 'u1', 'exact', 'scan')")
+
+
+def test_asset_may_be_in_one_exact_and_one_candidate_set(conn):
+    conn.execute("INSERT INTO asset (uuid) VALUES ('u1')")
+    conn.execute("INSERT INTO dup_set (id, tier, kind, size) VALUES (1, 'exact', 'image', 2)")
+    conn.execute("INSERT INTO dup_set (id, tier, kind, size) VALUES (2, 'candidate', 'image', 4)")
+    conn.execute("INSERT INTO dup_set_member VALUES (1, 'u1', 'exact', 'scan')")
+    conn.execute("INSERT INTO dup_set_member VALUES (2, 'u1', 'candidate', 'dhash')")
+
+
+def test_decision_cascades_on_set_delete(conn):
+    conn.execute("INSERT INTO asset (uuid) VALUES ('u1')")
+    conn.execute("INSERT INTO asset (uuid) VALUES ('u2')")
+    conn.execute("INSERT INTO dup_set (id, tier, kind, size) VALUES (1, 'exact', 'image', 2)")
+    conn.execute(
+        """INSERT INTO decision (set_id, keeper_uuid, keeper_reason, date_changes,
+                                 resolvable, review_flags, decided_at)
+           VALUES (1, 'u1', 'uuid', 0, 1, '', '2026-09-19T00:00:00')"""
+    )
+    conn.execute(
+        "INSERT INTO decision_loser (set_id, uuid, lost_on, carries) VALUES (1, 'u2', 'uuid', '{}')"
+    )
+    conn.execute("DELETE FROM dup_set WHERE id = 1")
+    assert conn.execute("SELECT COUNT(*) AS n FROM decision").fetchone()["n"] == 0
+    assert conn.execute("SELECT COUNT(*) AS n FROM decision_loser").fetchone()["n"] == 0
+
+
+def test_require_stage_complete_passes_when_complete(conn):
+    set_stage(conn, "group", "complete")
+    require_stage_complete(conn, "group")
+
+
+def test_require_stage_complete_refuses_otherwise(conn):
+    set_stage(conn, "group", "running")
+    with pytest.raises(StageIncomplete) as exc:
+        require_stage_complete(conn, "group")
+    assert "running" in str(exc.value)
+    assert "--force" in str(exc.value)
+
+
+def test_require_stage_complete_refuses_when_never_run(conn):
+    with pytest.raises(StageIncomplete) as exc:
+        require_stage_complete(conn, "group")
+    assert "never run" in str(exc.value)
+
+
+def test_require_stage_complete_force_overrides(conn):
+    require_stage_complete(conn, "group", force=True)
