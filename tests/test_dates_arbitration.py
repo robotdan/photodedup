@@ -116,9 +116,15 @@ def test_true_date_wins_when_it_equals_mtime_and_photos_db_holds_import_time():
     assert decision.source == "exif"
 
 
-def test_2001_sentinel_window_is_narrower_than_a_day():
+def test_2001_sentinel_covers_the_whole_day():
+    """A clock-reset run spans a full day and must be rejected as one event.
+
+    A narrower window split this library's 2001 run in half, rejecting the
+    photos before 14:00 and accepting the rest as a genuine 2001 date.
+    """
     assert reason(datetime(2001, 1, 1, 6, 0, 0)) == "sentinel"
-    assert reason(datetime(2001, 1, 1, 20, 0, 0)) is None
+    assert reason(datetime(2001, 1, 1, 20, 0, 0)) == "sentinel"
+    assert reason(datetime(2001, 1, 2, 12, 0, 0)) is None
 
 
 def test_rejects_date_below_floor():
@@ -207,7 +213,13 @@ def test_single_surviving_candidate_does_not_flag_review():
 
 
 def test_sentinel_dates_carry_per_entry_windows():
+    """The per-entry structure stays even though every entry now shares a window.
+
+    It is the mechanism for narrowing a single ambiguous sentinel without
+    touching the others, which is a judgement this library happened to resolve
+    one way and another library may not.
+    """
     windows = dict(SENTINEL_DATES)
     assert windows[datetime(1970, 1, 1)] == SENTINEL_WINDOW
     assert windows[datetime(1980, 1, 1)] == SENTINEL_WINDOW
-    assert windows[datetime(2001, 1, 1)] == timedelta(hours=14)
+    assert windows[datetime(2001, 1, 1)] == SENTINEL_WINDOW

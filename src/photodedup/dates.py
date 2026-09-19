@@ -98,7 +98,14 @@ SENTINEL_DATES: tuple[tuple[datetime, timedelta], ...] = (
     (datetime(1970, 1, 1), SENTINEL_WINDOW),    # Unix epoch
     (datetime(1904, 1, 1), SENTINEL_WINDOW),    # QuickTime epoch
     (datetime(1980, 1, 1), SENTINEL_WINDOW),    # FAT epoch
-    (datetime(2001, 1, 1), timedelta(hours=14)),  # Apple reference epoch
+    # Apple reference epoch. Briefly narrowed to 14 hours to avoid discarding a
+    # genuine 1 January 2001 capture, then restored: the user identified this
+    # library's 2001 group as a Fujifilm FinePix whose clock had reset, really
+    # shot in Chicago on 3 August 2002. A narrow window also split that single
+    # reset run in half, rejecting the photos before 14:00 and accepting the
+    # rest as a real date, which is worse than either whole answer. Recovering
+    # such runs is a clock-reset-cohort problem, not a sentinel-window one.
+    (datetime(2001, 1, 1), SENTINEL_WINDOW),
     (datetime(1899, 12, 30), SENTINEL_WINDOW),  # OLE automation epoch
 )
 
