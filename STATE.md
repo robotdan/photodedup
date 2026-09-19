@@ -141,6 +141,74 @@ when no record has a `date_added`.
 - **Spike 5 — iCloud originals fully downloaded: OPEN, user-owned.** Blocks the
   real survey run only. See "The only outstanding Phase 1 action" above.
 
+## Where this stands (updated 2026-09-19)
+
+Phase 1 is COMPLETE and its survey has been run against the live library.
+`reports/survey.md` holds the results. Phase 2 is IN PROGRESS.
+
+### Phase 1 result, in one paragraph
+
+65,974 assets surveyed in about five minutes, zero errors. 56,833 carry a
+usable EXIF capture date. Only two batches in the whole library had their
+capture dates overwritten with import time: 403 assets stamped
+2020-12-18 09:00 and 226 stamped 2023-01-14 11:00, so 629 photos in total
+rather than the thousands originally feared. Of those, 31 still carry a
+usable EXIF date, all in the 2020 batch; the 2023 batch has none. With the
+Google Takeout archives gone, roughly 598 photos have no mechanical
+recovery path. 79 files are damaged (exiftool reports a format error
+rather than merely absent EXIF) and are worth inspecting separately.
+
+### Running it again
+
+```
+uv run photodedup survey --missing-tolerance 0.05
+uv run photodedup report
+```
+
+The `--missing-tolerance` flag is required. 1,875 assets have no local
+original; every one was added in 2025 or 2026 and none belongs to either
+damaged batch, so they do not bear on the date question. They cannot be
+hashed and are recorded as `no_original`. The default tolerance of 1%
+would refuse the run.
+
+The catalog at `./catalog.sqlite` is derived and gitignored. Deleting and
+rebuilding it is the correct response to a schema change, not something
+to work around. A `SchemaVersionMismatch` on open means exactly that.
+
+### Phase 2 progress
+
+Plan: `docs/superpowers/plans/2026-09-19-photo-dedup-phase2-hash-group.md`
+Ledger (gitignored, on disk):
+`.superpowers/sdd/2026-09-19-photo-dedup-phase2-hash-group/progress.md`
+
+- Task 1 COMPLETE (`6de0891`) — `asset_hash`, `dup_group`, `dup_member`
+  tables at schema version 2, plus a guard that refuses to open a catalog
+  written by a different version. Reviewed clean. The catalog has been
+  rebuilt at version 2 with all 65,974 assets.
+- Task 2 COMPLETE (`a34f4b2`) — `jpeg_scan_hash` in
+  `src/photodedup/hashing.py`. Review was in progress when this was
+  written; re-dispatch it if there is no verdict recorded below. Its
+  validation over 3,000 real library JPEGs found 9 unparseable (0.3%) and
+  49 duplicate groups covering 98 assets.
+- Tasks 3-7 NOT STARTED: decoded-pixel and perceptual hashing, video
+  stream hashing, the hash stage, grouping, the duplicate report. The plan
+  contains full code and tests for each.
+
+Tasks 2, 3 and 4 all append to `src/photodedup/hashing.py`, and Tasks 5, 6
+and 7 each append a command to `cli.py`, so this phase must run strictly
+sequentially. Phase 1 allowed overlapping implementers only because its
+tasks touched disjoint files.
+
+### The number to watch
+
+The survey found 16,712 groups sharing an exact file size and pixel
+dimensions, implying at least 16,801 removable duplicates. That is a floor,
+not an estimate: any pair whose EXIF was rewritten differs in byte size and
+cannot appear in it. `jpeg_scan_hash` exists precisely to catch those, so a
+final count well above 16,801 confirms the premise of the whole approach.
+A count at or below it means the scan hash is buying nothing and the design
+needs revisiting.
+
 ## Phase 2 opportunity: clock-reset cohorts
 
 Investigated 2026-09-18, from the 2001-01-01 sentinel group.
