@@ -321,3 +321,204 @@ def survey_report(conn: Connection) -> str:
         _table(("hour", "assets"), capture_clusters[:40]),
     ]
     return "\n".join(parts)
+
+
+def group_totals(conn: Connection) -> list[tuple[str, str, int, int, int]]:
+    """Per signal: tier, group count, member count, removable count."""
+    rows = conn.execute(
+        """
+        SELECT signal, tier, COUNT(*) AS groups, SUM(size) AS members
+        FROM dup_group GROUP BY signal, tier ORDER BY tier, signal
+        """
+    ).fetchall()
+    return [
+        (r["signal"], r["tier"], r["groups"], r["members"], r["members"] - r["groups"])
+        for r in rows
+    ]
+
+
+def group_size_distribution(conn: Connection) -> list[tuple[int, int]]:
+    rows = conn.execute(
+        """
+        SELECT size, COUNT(*) AS n FROM dup_group
+        GROUP BY size ORDER BY size ASC
+        """
+    ).fetchall()
+    return [(r["size"], r["n"]) for r in rows]
+
+
+def signal_overlap(conn: Connection) -> list[tuple[str, int]]:
+    """How much extra the perceptual signal finds beyond the exact ones.
+
+    `dhash_only` is the review cost: assets no exact signal caught. If it is
+    small, perceptual review is cheap; if it is huge, it needs its own policy.
+    """
+    exact = """
+        SELECT DISTINCT m.uuid FROM dup_member m
+        JOIN dup_group g ON g.id = m.group_id WHERE g.tier = 'exact'
+    """
+    dh = """
+        SELECT DISTINCT m.uuid FROM dup_member m
+        JOIN dup_group g ON g.id = m.group_id WHERE g.signal = 'dhash'
+    """
+    one = lambda sql: conn.execute(f"SELECT COUNT(*) AS n FROM ({sql})").fetchone()["n"]
+    return [
+        ("exact_assets", one(exact)),
+        ("dhash_assets", one(dh)),
+        ("both", one(f"{exact} INTERSECT {dh}")),
+        ("dhash_only", one(f"{dh} EXCEPT {exact}")),
+    ]
+
+
+def multi_group_assets(conn: Connection) -> int:
+    """Assets appearing in more than one group, which the signals expect."""
+    return conn.execute(
+        """
+        SELECT COUNT(*) AS n FROM (
+            SELECT uuid FROM dup_member GROUP BY uuid HAVING COUNT(*) > 1
+        )
+        """
+    ).fetchone()["n"]
+
+
+def cohort_pairs(conn: Connection) -> int:
+    """Exact groups whose members disagree about capture date by over the margin.
+
+    These are the cohort A / cohort B pairs. They are the groups where removing
+    a duplicate also rescues a date, which is the whole point of the project.
+    """
+    return conn.execute(
+        """
+        SELECT COUNT(*) AS n FROM (
+            SELECT g.id
+            FROM dup_group g
+            JOIN dup_member m ON m.group_id = g.id
+            JOIN asset a ON a.uuid = m.uuid
+            WHERE g.tier = 'exact' AND a.photos_date IS NOT NULL
+            GROUP BY g.id
+            HAVING COUNT(a.photos_date) > 1
+               AND strftime('%s', MAX(a.photos_date))
+                   - strftime('%s', MIN(a.photos_date)) > :margin
+        )
+        """,
+        {"margin": _MARGIN_SECONDS},
+    ).fetchone()["n"]
+
+
+def sample_groups(conn: Connection, *, limit: int = 20) -> list[list[tuple]]:
+    """A few exact groups rendered member by member, for checking by eye."""
+    ids = [
+        r["id"]
+        for r in conn.execute(
+            """
+            SELECT g.id FROM dup_group g WHERE g.tier = 'exact'
+            ORDER BY g.size DESC, g.id ASC LIMIT :limit
+            """,
+            {"limit": limit},
+        )
+    ]
+    out = []
+    for group_id in ids:
+        rows = conn.execute(
+            """
+            SELECT g.signal AS signal, a.original_filename AS name,
+                   a.photos_date AS captured, a.file_size AS bytes,
+                   a.width AS w, a.height AS h
+            FROM dup_member m
+            JOIN dup_group g ON g.id = m.group_id
+            JOIN asset a ON a.uuid = m.uuid
+            WHERE m.group_id = :gid
+            ORDER BY a.photos_date IS NULL, a.photos_date ASC
+            """,
+            {"gid": group_id},
+        ).fetchall()
+        out.append(
+            [
+                (r["signal"], r["name"], r["captured"], r["bytes"], f"{r['w']}x{r['h']}")
+                for r in rows
+            ]
+        )
+    return out
+
+
+def exact_components(conn: Connection) -> tuple[int, int, int]:
+    """Merge overlapping exact-tier groups into connected components.
+
+    A pair found by two signals sits in two groups; summing per-signal
+    counts would count it twice. Union-find over memberships gives the true
+    (components, assets, removable) where removable = assets - components.
+    """
+    parent: dict[str, str] = {}
+
+    def find(x: str) -> str:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: str, b: str) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    rows = conn.execute(
+        """
+        SELECT m.group_id AS gid, m.uuid AS uuid
+        FROM dup_member m JOIN dup_group g ON g.id = m.group_id
+        WHERE g.tier = 'exact' ORDER BY m.group_id
+        """
+    ).fetchall()
+    by_group: dict[int, list[str]] = {}
+    for r in rows:
+        parent.setdefault(r["uuid"], r["uuid"])
+        by_group.setdefault(r["gid"], []).append(r["uuid"])
+    for members in by_group.values():
+        for other in members[1:]:
+            union(members[0], other)
+    roots = {find(u) for u in parent}
+    assets = len(parent)
+    return (len(roots), assets, assets - len(roots))
+
+
+def duplicate_report(conn: Connection) -> str:
+    totals = group_totals(conn)
+    exact_removable = sum(t[4] for t in totals if t[1] == "exact")
+    all_removable = sum(t[4] for t in totals)
+    components, comp_assets, comp_removable = exact_components(conn)
+
+    parts = [
+        "# Duplicate Report\n",
+        "Groups are formed per signal, so one set of assets can appear as both",
+        "a `scan` group and a `pixel` group. Those are two views of one fact.",
+        "Only `exact` tiers are ever safe to resolve automatically.\n",
+        f"- Removable on exact signals, de-duplicated across signals: "
+        f"**{comp_removable}** ({comp_assets} assets in {components} sets)",
+        f"- Removable on exact signals, summed per signal (over-counts pairs "
+        f"found by two signals): **{exact_removable}**",
+        f"- Removable including perceptual candidates: **{all_removable}**",
+        f"- Assets in more than one group: {multi_group_assets(conn)}\n",
+        "## Groups by signal\n",
+        _table(
+            ("signal", "tier", "groups", "members", "removable"),
+            [tuple(t) for t in totals],
+        ),
+        "\n## Group sizes\n",
+        _table(("members in group", "groups"), group_size_distribution(conn)),
+        "\n## Signal overlap\n",
+        "`dhash_only` counts assets that only perceptual matching found. That",
+        "number is the review workload perceptual matching would add.\n",
+        _table(("measure", "assets"), signal_overlap(conn)),
+        "\n## Groups that rescue a date\n",
+        "Exact groups whose members disagree about capture date by more than 26",
+        "hours. These are the cohort A / cohort B pairs, where de-duplicating",
+        "also recovers the true date.\n",
+        _table(("measure", "groups"), [("date-rescuing exact groups", cohort_pairs(conn))]),
+        "\n## Sample groups\n",
+        "The largest exact groups, member by member, for checking by eye.\n",
+    ]
+
+    for index, members in enumerate(sample_groups(conn), start=1):
+        parts.append(f"\n**Group {index}**\n")
+        parts.append(_table(("signal", "filename", "captured", "bytes", "size"), members))
+
+    return "\n".join(parts)

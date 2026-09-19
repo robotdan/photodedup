@@ -10,7 +10,7 @@ from photodedup.catalog import open_catalog
 from photodedup.grouping import run_group
 from photodedup.hash_stage import run_hash
 from photodedup.library import LibraryUnavailable, iter_assets
-from photodedup.report import survey_report
+from photodedup.report import duplicate_report, survey_report
 from photodedup.survey import (
     MISSING_ORIGINALS_TOLERANCE,
     MissingOriginalsError,
@@ -123,5 +123,24 @@ def group(catalog: Path) -> None:
     result = run_group(conn)
     click.echo(
         f"{result.groups} groups covering {result.members} assets; "
-        f"{result.removable} removable if every group keeps one"
+        f"{result.removable} removable if every group keeps one; per signal — "
+        f"see `photodedup duplicates` for the de-duplicated count"
     )
+
+
+@main.command()
+@click.option(
+    "--catalog", type=click.Path(path_type=Path), default=DEFAULT_CATALOG, show_default=True
+)
+@click.option(
+    "--out",
+    type=click.Path(path_type=Path),
+    default=Path("reports/duplicates.md"),
+    show_default=True,
+)
+def duplicates(catalog: Path, out: Path) -> None:
+    """Write the Markdown duplicate report."""
+    conn = open_catalog(catalog)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(duplicate_report(conn))
+    click.echo(f"wrote {out}")
