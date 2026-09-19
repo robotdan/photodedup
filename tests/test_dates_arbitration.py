@@ -139,22 +139,22 @@ def test_none_value_is_rejected_as_unparseable():
 
 
 def test_earliest_surviving_candidate_wins():
+    # A locally-scoped date_added, not the shared ADDED constant: ADDED sits
+    # inside IMPORT_STAMPS[0] (which ends at 09:26:02), and this test is about
+    # at_or_after_date_added, not the stamp rule.
+    added = datetime(2020, 12, 18, 10, 0, 0)
     decision = choose_date(
         [
-            Candidate("photos_db", ADDED, None),
+            Candidate("photos_db", added, None),
             Candidate("exif", datetime(2003, 2, 23, 9, 8, 8), None),
         ],
-        date_added=ADDED,
+        date_added=added,
         file_mtime=MTIME,
         now=NOW,
     )
     assert decision.value == datetime(2003, 2, 23, 9, 8, 8)
     assert decision.source == "exif"
-    # ADDED sits inside IMPORT_STAMPS[0], so the same instant is both the date
-    # this candidate is rejected against and a stamped import window; either
-    # reason is a correct rejection of the photos_db candidate.
-    assert decision.rejected[0][0] == "photos_db"
-    assert decision.rejected[0][1] in ("at_or_after_date_added", "import_stamp")
+    assert ("photos_db", "at_or_after_date_added") in decision.rejected
 
 
 def test_source_rank_breaks_exact_ties():
