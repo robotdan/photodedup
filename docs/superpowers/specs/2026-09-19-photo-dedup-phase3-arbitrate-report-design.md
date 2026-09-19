@@ -48,11 +48,19 @@ Explicitly out of scope for Phase 3:
    exact rule.
 5. `choose_date` in `dates.py` becomes the single authority for capture
    dates. The SQL re-expression of its logic in `report.py` is deleted.
-6. The two import-time stamp clusters the survey found (403 assets at
-   2020-12-18 09:00 and 226 at 2023-01-14 11:00) become survey-derived
-   sentinels for `photos_db` candidates. The parent spec's
-   `at_or_after_date_added` rule was measured and does not catch them
-   (see `STATE.md`, "What the final review measured"); clustering does.
+6. The two import-time stamp intervals the survey found become a
+   hand-confirmed constant, `IMPORT_STAMPS` in `dates.py`, that rejects
+   `photos_db` candidates only. Measured on 2026-09-19: 2020-12-18
+   09:03:42 to 09:26:02 (403 assets, 31 with EXIF, none agreeing) and
+   2023-01-14 11:06:19 to 11:49:25 (226 assets). They are NOT derived
+   automatically from cluster size: a third hourly cluster (218 assets at
+   2023-05-03 01:00, no EXIF, all added within two minutes on 2025-03-12)
+   is the same size and its nature is unknown, and one asset inside the
+   2023 interval carries a genuine EXIF date that agrees with its Photos
+   date and must survive. The parent spec's `at_or_after_date_added` rule
+   was measured and does not catch the stamps (see `STATE.md`, "What the
+   final review measured"). The survey report's capture-hour clustering
+   remains the way a human finds stamps on another library.
 
 ## Schema version 3
 
@@ -274,15 +282,15 @@ evaluated against the candidate's *own* asset, because `date_added`
 differs per member and that is the whole point of a cohort A / cohort B
 pair.
 
-`choose_date` gains one thing: a `stamps: Sequence[datetime]` parameter
-(default empty) and a rejection reason `import_stamp` for a `photos_db`
-candidate within `STAMP_WINDOW = timedelta(minutes=30)` of any stamp.
-`arbitrate` reads the stamp list from a new `run.import_stamps` column
-that `survey` writes from its `photos_date_clusters` (clusters of at least
-100 assets sharing the same minute). On this library that yields exactly
-the two known stamps. The report's `_EXIF_VS_PHOTOS_SQL` and any other SQL
-that re-implements `rejection_reason` is deleted and replaced by calls
-that go through `choose_date`.
+`rejection_reason` and `choose_date` gain a `stamps` parameter defaulting
+to `IMPORT_STAMPS`, a tuple of `(start, end)` datetimes, and a rejection
+reason `import_stamp` for a `photos_db` candidate with `start <= value <=
+end`. Pooling across a set is done by a new `choose_date_pooled` in
+`dates.py`, which takes one `Pool(candidates, date_added, file_mtime)` per
+member and applies the single earliest-survivor rule; `choose_date` becomes
+the one-pool special case of it, so there is still exactly one authority.
+The report's `_EXIF_VS_PHOTOS_SQL` is deleted and `exif_vs_photos_db` is
+rewritten in Python over `rejection_reason`, keeping its return shape.
 
 `date_changes = 1` when the arbitrated value differs from the keeper's own
 `photos_date` by more than `margin`. This is the count that Phase 4's
@@ -332,9 +340,9 @@ reports/review/
   index.html
   exact/001.html … NNN.html
   candidate/001.html … (sampled)
-  thumbs/<uuid>.jpg      (symlinks or copies of thumb_path; copies if the
-                          library is on a different volume, since a report
-                          that breaks when the library moves is useless)
+  samples/<section>.html (one page per sampled section, cards inline)
+  thumbs/<uuid>.jpg      (symlinks to thumb_path, falling back to a copy
+                          when a symlink cannot be made)
   review.css
 ```
 
@@ -346,11 +354,14 @@ stylesheet; there is no framework and nothing is fetched from the network.
 
 1. Totals: exact sets, exact assets, removable, resolvable sets, sets
    needing review by flag, dates rescued, unique damaged files.
-2. Sampled sections, each a list of set cards linking to the set's page
-   anchor: dates rescued (largest disagreement first), largest sets, sets
-   with a truncated member, size-spread sets, `keeper_smaller` (expected
-   empty, printed as "0, as required"), candidate-only sets (closest dhash
-   distance first, up to `--sample`).
+2. Sampled sections, each a count on the index linking to a page of set
+   cards under `samples/`: dates rescued (largest disagreement first),
+   largest sets, sets with a truncated member, size-spread sets,
+   `keeper_smaller` (expected empty, printed as "0, as required"), and
+   candidate-only sets. Candidate groups are formed on identical dhash, so
+   dhash distance is zero by construction; the candidate sample is ordered
+   by the largest pairwise phash distance among members, smallest first,
+   up to `--sample`.
 3. The page index for the full exact listing.
 
 A set card shows every member as a thumbnail with the keeper outlined,
@@ -359,11 +370,10 @@ arbitrated date if it differs, `lost_on` or `keeper_reason`, and the
 `carries` summary. Date fields use three colours: agree, conflict,
 missing, as the parent spec asks.
 
-`report.py` is already 625 lines and about to grow. It is split: the
-Markdown survey and duplicate reports stay in `report.py`; the HTML
-review report is a new `review.py`, and the SQL summary queries both use
-move to `queries.py`. Nothing else in `report.py` changes beyond the
-deletions Task C requires.
+The HTML review report is a new module, `review.py`. `report.py` keeps
+the Markdown survey and duplicate reports and changes only where Tasks A
+and C require (a coverage row for truncated files, `exif_vs_photos_db`,
+and `exact_components` reading `dup_set`).
 
 ### Tests
 
