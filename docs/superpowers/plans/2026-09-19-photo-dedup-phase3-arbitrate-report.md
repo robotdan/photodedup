@@ -735,7 +735,7 @@ def prefix_groups(conn: Connection) -> list[tuple[str, list[str]]]:
     truncated = conn.execute(
         """
         SELECT h.uuid AS uuid, a.path AS path, h.bytes_read AS length,
-               h.pixel_width AS w, h.pixel_height AS h,
+               h.pixel_width AS pw, h.pixel_height AS ph,
                a.kind AS kind, a.has_raw AS has_raw
         FROM asset_hash h
         JOIN asset a ON a.uuid = h.uuid AND a.survey_status = 'ok'
@@ -767,7 +767,7 @@ def prefix_groups(conn: Connection) -> list[tuple[str, list[str]]]:
             """,
             {
                 "kind": row["kind"], "has_raw": row["has_raw"],
-                "w": row["w"], "h": row["h"], "length": row["length"],
+                "w": row["pw"], "h": row["ph"], "length": row["length"],
             },
         ).fetchall()
         matches = [p for p in partners if _read_prefix(p["path"], row["length"]) == head]
@@ -2665,6 +2665,7 @@ import json
 import os
 import shutil
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from sqlite3 import Connection, Row
 
@@ -2802,10 +2803,10 @@ def _render_set(entry: dict, thumbs_dir: Path, *, depth: int, counters: dict) ->
         is_keeper = m["uuid"] == s["keeper_uuid"]
         name = _link_thumb(m["thumb_path"], thumbs_dir, m["uuid"])
         if name is None:
-            counters["placeholders"] += 1
+            counters["placeholders"].add(m["uuid"])
             img = "<div class='placeholder'>no thumbnail</div>"
         else:
-            counters["thumbs"] += 1
+            counters["thumbs"].add(m["uuid"])
             img = f"<img loading='lazy' src='{'../' * depth}thumbs/{_e(name)}' alt=''>"
         carries = json.loads(m["carries"]) if m["carries"] else {}
         cards.append(
@@ -2851,7 +2852,9 @@ def write_review(
         (out_dir / sub).mkdir(parents=True, exist_ok=True)
     (out_dir / "review.css").write_text(CSS)
     thumbs_dir = out_dir / "thumbs"
-    counters = {"thumbs": 0, "placeholders": 0}
+    # Sets of uuids: a member rendered on a listing page and again on a sample
+    # page is still one thumbnail on disk.
+    counters: dict[str, set[str]] = {"thumbs": set(), "placeholders": set()}
 
     entries = _load(conn)
     exact = [e for e in entries if e["set"]["tier"] == "exact"]
@@ -2883,9 +2886,19 @@ def write_review(
         sizes = [m["file_size"] for m in e["members"] if m["file_size"] is not None]
         return max(sizes) - min(sizes) if sizes else 0
 
+    def keeper_gap(e: dict) -> float:
+        """Seconds between the arbitrated date and the keeper's own Photos date."""
+        s = e["set"]
+        keeper = next((m for m in e["members"] if m["uuid"] == s["keeper_uuid"]), None)
+        if keeper is None or not keeper["photos_date"] or not s["date_value"]:
+            return float("inf")
+        return abs(
+            (datetime.fromisoformat(s["date_value"]) - datetime.fromisoformat(keeper["photos_date"])).total_seconds()
+        )
+
     samples: list[tuple[str, str, list[dict]]] = [
         ("dates", "Dates rescued (largest keeper disagreement first)",
-         sorted([e for e in exact if e["set"]["date_changes"]], key=lambda e: e["set"]["id"])[:sample]),
+         sorted([e for e in exact if e["set"]["date_changes"]], key=lambda e: (-keeper_gap(e), e["set"]["id"]))[:sample]),
         ("largest", "Largest exact sets",
          sorted(exact, key=lambda e: (-e["set"]["size"], e["set"]["id"]))[:sample]),
         ("truncated", "Sets with a truncated member",
@@ -2946,7 +2959,9 @@ def write_review(
     (out_dir / "index.html").write_text(_page("Duplicate review", index, depth=0))
     pages += 1
 
-    result = ReviewResult(len(entries), pages, counters["thumbs"], counters["placeholders"])
+    result = ReviewResult(
+        len(entries), pages, len(counters["thumbs"]), len(counters["placeholders"])
+    )
     set_stage(
         conn, "review", "complete",
         notes=f"{result.sets} sets on {result.pages} pages, {result.thumbs} thumbnails",
@@ -2954,7 +2969,9 @@ def write_review(
     return result
 ```
 
-Note that `counters["thumbs"]` counts each member render, so a member that appears on both a listing page and a sample page is counted twice. `test_writes_index_pages_and_thumbs` expects 6 thumbs and 1 placeholder over the whole run: set 1 renders on `exact/001` and `samples/dates`, set 2 on `exact/002` and `samples/size_spread`, set 3 on `candidate/001` and `samples/candidate`. If that expectation and the count disagree, change the implementation to count distinct published files (`len(list(thumbs_dir.iterdir()))`) and distinct placeholder uuids, and keep the test's numbers (6 and 1), which are the distinct counts.
+`ReviewResult.thumbs` and `.placeholders` are distinct member counts, not
+render counts; a set rendered on a listing page and a sample page contributes
+its members once. `test_writes_index_pages_and_thumbs` expects 6 and 1.
 
 - [ ] **Step 4: Run the whole suite**
 
