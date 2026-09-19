@@ -75,14 +75,16 @@ def _added_ts(value: str | None) -> float:
 
 def rank_key(m: Member) -> tuple:
     """Sort key: ascending order puts the keeper first. One component per
-    entry of KEEPER_RULES, in the same order."""
+    entry of KEEPER_RULES, in the same order. "Intact" means hashed ok,
+    nothing else: any other hash_status (error, no_original, skipped,
+    missing) never wins the `intact` component, only `truncated` does."""
     return (
-        1 if m.hash_status == "truncated" else 0,
+        0 if m.hash_status == "ok" else 1,
         -(m.file_size or 0),
         0 if m.is_favorite else 1,
         0 if m.has_adjustments else 1,
         0 if _has_caption(m) else 1,
-        -len(m.albums),
+        -len(set(m.albums)),
         _added_ts(m.date_added),
         m.uuid,
     )
@@ -147,6 +149,10 @@ def carries(keeper: Member, loser: Member) -> dict:
 def review_flags(
     tier: str, members: Sequence[Member], keeper: Member, decision: Decision
 ) -> list[str]:
+    """Flags are appended in this fixed order: candidate_tier, dates_disagree,
+    no_plausible_date, png, multiframe, truncated_member, unhashed_member,
+    size_spread, keeper_smaller. Only `size_spread` and `dates_disagree` are
+    informational; every other flag blocks resolvability."""
     flags: list[str] = []
     if tier == "candidate":
         flags.append("candidate_tier")
@@ -160,13 +166,15 @@ def review_flags(
         flags.append("multiframe")
     if any(m.hash_status == "truncated" for m in members):
         flags.append("truncated_member")
+    if any(m.hash_status not in ("ok", "truncated") for m in members):
+        flags.append("unhashed_member")
     intact_sizes = [m.file_size for m in members if m.hash_status != "truncated" and m.file_size is not None]
     if len(intact_sizes) > 1 and max(intact_sizes) - min(intact_sizes) >= SIZE_SPREAD_BYTES:
         flags.append("size_spread")
     # Impossible under rank_key. Computed from the data, not the rule, so a
     # bug in the rule shows up in the report instead of in a deletion.
-    if keeper.hash_status != "truncated" and any(
-        m.hash_status != "truncated" and (m.file_size or 0) > (keeper.file_size or 0)
+    if keeper.hash_status == "ok" and any(
+        m.hash_status == "ok" and (m.file_size or 0) > (keeper.file_size or 0)
         for m in members
     ):
         flags.append("keeper_smaller")
@@ -237,7 +245,7 @@ def run_arbitrate(
     """Rewrite every decision from the current sets and rules."""
     require_stage_complete(conn, "group", force=force)
     set_stage(conn, "arbitrate", "running")
-    decided_at = datetime.now().replace(microsecond=0).isoformat()
+    decided_at = (now or datetime.now()).replace(microsecond=0).isoformat()
 
     sets = conn.execute("SELECT id, tier FROM dup_set ORDER BY id").fetchall()
     resolvable_n = review_n = rescued_n = 0

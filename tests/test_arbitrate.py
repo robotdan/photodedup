@@ -111,6 +111,31 @@ def test_keeper_is_never_smaller_than_an_intact_loser():
     assert all(keeper.file_size >= m.file_size for m, _ in losers)
 
 
+def test_keeper_smaller_tripwire_fires_on_a_wrong_keeper():
+    """Computed from the data, not the rule, so a broken rank_key shows up
+    as a blocking flag rather than a deletion."""
+    from photodedup.arbitrate import review_flags
+    from photodedup.dates import Decision
+    small = member("small", file_size=1)
+    big = member("big", file_size=2)
+    decision = Decision(datetime(2014, 5, 12, 17, 0, 0), "exif", (), False, None)
+    flags = review_flags("exact", [small, big], small, decision)
+    assert flags == ["keeper_smaller"]
+    assert "keeper_smaller" not in {"size_spread", "dates_disagree"}
+
+
+def test_unhashed_member_never_wins_and_blocks():
+    errored = member("e", hash_status="error", file_size=9999)
+    ok = member("k", file_size=1)
+    keeper, reason, _ = choose_keeper([errored, ok])
+    assert keeper.uuid == "k" and reason == "intact"
+
+
+def test_duplicate_album_names_count_once():
+    k, r, _ = choose_keeper([member("a", albums=("one", "one")), member("b", albums=("one", "two"))])
+    assert (k.uuid, r) == ("b", "albums")
+
+
 def test_carries_reports_what_the_keeper_lacks():
     keeper = member("k", albums=("A",), keywords=("x",), title=None, description=None)
     loser = member("l", albums=("A", "B"), keywords=("x", "y"), is_favorite=True,
@@ -296,3 +321,43 @@ def test_rerun_replaces_decisions(conn):
 def test_empty_catalog_completes_with_zero(conn):
     result = run_arbitrate(conn, now=NOW)
     assert result.sets == 0
+
+
+def test_keeper_smaller_blocks_resolvability(conn, monkeypatch):
+    import photodedup.arbitrate as arb
+    add_asset(conn, "a", size=10)
+    add_asset(conn, "b", size=20)
+    add_set(conn, 1, ["a", "b"])
+    real = arb.choose_keeper
+
+    def wrong(members):
+        keeper, reason, losers = real(members)
+        # Swap: hand back the runner-up as keeper.
+        loser, why = losers[0]
+        return loser, why, [(keeper, why)]
+
+    monkeypatch.setattr(arb, "choose_keeper", wrong)
+    run_arbitrate(conn, now=NOW)
+    d = decision(conn, 1)
+    assert d["keeper_uuid"] == "a"
+    assert "keeper_smaller" in d["review_flags"].split(",")
+    assert d["resolvable"] == 0
+
+
+def test_unhashed_member_flag_blocks_resolvability(conn):
+    add_asset(conn, "a", size=10, hash_status="error")
+    add_asset(conn, "b", size=20)
+    add_set(conn, 1, ["a", "b"])
+    run_arbitrate(conn, now=NOW)
+    d = decision(conn, 1)
+    assert d["keeper_uuid"] == "b"
+    assert "unhashed_member" in d["review_flags"].split(",")
+    assert d["resolvable"] == 0
+
+
+def test_decided_at_honours_injected_now(conn):
+    add_asset(conn, "a", size=10)
+    add_asset(conn, "b", size=20)
+    add_set(conn, 1, ["a", "b"])
+    run_arbitrate(conn, now=NOW)
+    assert decision(conn, 1)["decided_at"] == NOW.isoformat()
