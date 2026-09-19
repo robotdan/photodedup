@@ -176,3 +176,39 @@ def test_flags_and_carries_appear(populated, tmp_path):
     text = " ".join(parse(out / "exact" / "001.html").text)
     assert "2014-05-12T17:00:00" in text
     assert "exif" in text
+
+
+def test_rerun_removes_stale_pages_and_thumbs(populated, tmp_path):
+    out = tmp_path / "out"
+    write_review(populated, out, per_page=1)
+    assert (out / "exact" / "002.html").exists()
+    stale = out / "thumbs" / "zzz-stale.jpg"
+    stale.write_bytes(b"x")
+    write_review(populated, out, per_page=250)
+    assert not (out / "exact" / "002.html").exists()
+    assert not stale.exists()
+    assert (out / "exact" / "001.html").exists()
+
+
+def test_rerun_does_not_touch_thumbnail_sources(populated, tmp_path):
+    out = tmp_path / "out"
+    write_review(populated, out)
+    src = Path(populated.execute("SELECT thumb_path FROM asset WHERE uuid='a1'").fetchone()["thumb_path"])
+    assert src.exists()
+    write_review(populated, out)
+    assert src.exists() and src.stat().st_size > 0
+
+
+def test_refuses_when_sets_have_no_decision(populated, tmp_path):
+    populated.execute("DELETE FROM decision")
+    populated.commit()
+    with pytest.raises(StageIncomplete) as exc:
+        write_review(populated, tmp_path / "out")
+    assert "arbitrate" in str(exc.value)
+
+
+def test_force_reports_only_decided_sets(populated, tmp_path):
+    populated.execute("DELETE FROM decision WHERE set_id = 3")
+    populated.commit()
+    result = write_review(populated, tmp_path / "out", force=True)
+    assert result.sets == 2

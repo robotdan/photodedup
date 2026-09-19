@@ -18,7 +18,7 @@ from sqlite3 import Connection, Row
 
 import imagehash
 
-from photodedup.catalog import require_stage_complete, set_stage
+from photodedup.catalog import StageIncomplete, require_stage_complete, set_stage
 
 CSS = """
 body { font: 14px/1.4 -apple-system, Helvetica, Arial, sans-serif; margin: 1.5rem; color: #222; }
@@ -192,10 +192,26 @@ def write_review(
     force: bool = False,
 ) -> ReviewResult:
     require_stage_complete(conn, "arbitrate", force=force)
+    missing = conn.execute(
+        """
+        SELECT COUNT(*) AS n FROM dup_set s
+        WHERE NOT EXISTS (SELECT 1 FROM decision d WHERE d.set_id = s.id)
+        """
+    ).fetchone()["n"]
+    if missing and not force:
+        raise StageIncomplete(
+            f"{missing} duplicate sets have no decision; the groups were rebuilt "
+            "after the last arbitrate run. Re-run `photodedup arbitrate`, or pass "
+            "--force to report only the sets that still have one."
+        )
     set_stage(conn, "review", "running")
 
     out_dir = Path(out_dir)
+    # Regenerated in full every run: a shrinking rerun must not leave stale
+    # pages or thumbnails behind. thumbs/ holds only symlinks or copies of
+    # Photos derivatives, so removing it touches nothing in the library.
     for sub in ("exact", "candidate", "samples", "thumbs"):
+        shutil.rmtree(out_dir / sub, ignore_errors=True)
         (out_dir / sub).mkdir(parents=True, exist_ok=True)
     (out_dir / "review.css").write_text(CSS)
     thumbs_dir = out_dir / "thumbs"
