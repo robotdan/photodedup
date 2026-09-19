@@ -50,7 +50,53 @@ All ten tasks committed: `8ad073c`, `f651d74`, `47238c3`, `f97df79`,
 
 `uv run pytest -v` passes. Do not re-implement any of it.
 
-## Phase 2 results (to be filled after the real run)
+## Phase 2 results (real run, 2026-09-19)
+
+Hash stage: 64,083 assets hashed ok, 1,875 no local original, 16 errors
+("no usable hash": neither scan nor pixel hash succeeded — 15 JPEG, 1 PNG;
+13 of the JPEGs are a single 2017 burst sequence, plus `Picture 046(9)`,
+`047(8)`, `049(5)`, `IMAG0136/0137`, three `IMG_2016*` and one 2013). These
+16 are worth opening by hand; they may be corrupt. Single-threaded run took
+~75 minutes in the agent shell; in a real terminal with the process pool
+expect well under 15.
+
+Grouping (`photodedup group`): 52,323 groups over 106,714 memberships
+(per-signal, over-counting). Full report in `reports/duplicates.md`
+(gitignored; regenerate with `uv run photodedup duplicates`).
+
+THE NUMBERS THAT MATTER, de-duplicated across signals:
+
+- Exact-tier removable: **16,871** assets, in 16,846 sets of 33,717 assets.
+  This is the count a later phase would stage for deletion on exact evidence
+  alone. Group sizes: 50,968 pairs, 839 triples, 413 quads, a tail up to 18.
+- Including perceptual (dhash) candidates: 21,088 removable. So perceptual
+  matching adds 4,217 more removals but 6,437 assets that ONLY perceptual
+  matching finds, every one of which needs human review.
+- Date-rescuing exact groups: **570** — exact groups whose members disagree
+  on capture date by more than 26 hours. These are the cohort A / cohort B
+  pairs where de-duplication also recovers a true date.
+- Motion-photo size-spread groups (members differing ≥1 MB): **0**. The
+  re-import did not strip MP4 trailers, so the Phase 3 keeper rule is a
+  safety net rather than a live case here.
+- Exact by signal: scan 16,622 groups, pixel 16,635, video 211. Scan and
+  pixel agree almost completely (33,295 assets in both), which is the
+  expected shape: nearly every duplicate is a JPEG whose scan data survived.
+
+How this compares with the survey's floor. The survey predicted at least
+16,801 removable from identical (file_size, width, height) alone; the
+content-based exact count is 16,871. The scan hash therefore recovered on
+the order of 70 duplicates that byte-level comparison would have split —
+consistent with the 67 the Task 2 review measured on the re-imported
+cohort. THE PREMISE HELD, BUT THE MARGIN IS SMALL: on this library the
+overwhelming majority of duplicates are byte-identical files imported
+twice, and the EXIF-rewritten pairs are a thin layer on top. Phase 3 should
+not assume otherwise.
+
+Still to do before Phase 3 starts: the user runs the parallel-path check
+described above (`--workers 4 --limit 2000` on a catalog copy) and the
+16 error files get a look.
+
+
 
 _Empty on purpose._ Fill this in with the output of `photodedup group` and
 `photodedup duplicates` once the hash stage completes: total groups, members,
