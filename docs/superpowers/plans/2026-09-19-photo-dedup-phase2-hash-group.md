@@ -211,7 +211,6 @@ git commit -m "feat: add asset_hash and dup tables, plus a schema version guard"
 - Consumes: nothing.
 - Produces:
   - `jpeg_scan_hash(data: bytes) -> str | None` — SHA-256 hex of the JPEG's structural and entropy-coded segments with every metadata segment removed. Returns `None` if the bytes are not a parseable JPEG.
-  - `NotAJPEG(ValueError)`
 
 **Why this is the primary signal.** A JPEG is a sequence of marker segments. Rewriting EXIF replaces the APP1 segment and leaves the compressed image data byte-identical. Hashing everything EXCEPT the metadata segments therefore matches two files that hold the same image with different metadata, which is exactly the cohort A / cohort B pair. It requires no decoding, runs at read speed, and cannot produce a false positive.
 
@@ -398,11 +397,13 @@ def jpeg_scan_hash(data: bytes) -> str | None:
             digest.update(segment)
 
         if marker == _SOS:
-            # Entropy-coded data runs from here to EOI. It contains 0xFF00
-            # stuffing and RST markers, so the only safe terminator is the
-            # final EOI; hash everything up to it.
-            end = data.rfind(b"\xff\xd9")
-            if end < i:
+            # Entropy-coded data runs from here to EOI. Inside it every 0xFF is
+            # followed by 0x00 (stuffing) or 0xD0-0xD7 (restart), and between a
+            # progressive file's later SOS segments only table markers appear,
+            # so the FIRST 0xFFD9 after this point is the real EOI. Searching
+            # forward also ignores any bytes a writer appended after it.
+            end = data.find(b"\xff\xd9", i)
+            if end < 0:
                 return None
             digest.update(data[i:end])
             digest.update(b"\xff\xd9")
@@ -429,10 +430,18 @@ import sqlite3, collections
 from pathlib import Path
 from photodedup.hashing import jpeg_scan_hash
 c = sqlite3.connect('catalog.sqlite'); c.row_factory = sqlite3.Row
+# Target the re-imported cohort: same filename and dimensions, differing byte
+# size. A plain LIMIT in rowid order lands outside it and measures nothing.
 rows = c.execute('''
-    SELECT uuid, path, original_filename FROM asset
-    WHERE survey_status='ok' AND path IS NOT NULL AND uti='public.jpeg'
-    LIMIT 3000
+    SELECT a.uuid, a.path, a.original_filename FROM asset a
+    JOIN (SELECT original_filename, width, height FROM asset
+          WHERE survey_status='ok' AND path IS NOT NULL AND uti='public.jpeg'
+          GROUP BY original_filename, width, height
+          HAVING COUNT(*) > 1 AND MIN(file_size) <> MAX(file_size)) g
+      ON g.original_filename = a.original_filename
+     AND g.width = a.width AND g.height = a.height
+    WHERE a.survey_status='ok' AND a.path IS NOT NULL AND a.uti='public.jpeg'
+    LIMIT 6000
 ''').fetchall()
 h = collections.Counter(); failed = 0
 for r in rows:
