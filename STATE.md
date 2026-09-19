@@ -1,6 +1,6 @@
 # Photo De-duplication — Working State
 
-**Last updated:** 2026-09-18
+**Last updated:** 2026-09-19
 **Current phase:** Phase 1 (foundation and survey) — CODE COMPLETE, survey not yet run
 **Branch:** `phase1-survey`
 **Plan:** docs/superpowers/plans/2026-09-18-photo-dedup-phase1-survey.md
@@ -185,14 +185,28 @@ Ledger (gitignored, on disk):
   tables at schema version 2, plus a guard that refuses to open a catalog
   written by a different version. Reviewed clean. The catalog has been
   rebuilt at version 2 with all 65,974 assets.
-- Task 2 COMPLETE (`a34f4b2`) — `jpeg_scan_hash` in
-  `src/photodedup/hashing.py`. Review was in progress when this was
-  written; re-dispatch it if there is no verdict recorded below. Its
-  validation over 3,000 real library JPEGs found 9 unparseable (0.3%) and
-  49 duplicate groups covering 98 assets.
-- Tasks 3-7 NOT STARTED: decoded-pixel and perceptual hashing, video
-  stream hashing, the hash stage, grouping, the duplicate report. The plan
-  contains full code and tests for each.
+- Task 2 COMPLETE (`a34f4b2`, fix `97c72e4`) — `jpeg_scan_hash`. Reviewed
+  clean after one fix round (EOI search made forward so bytes appended after
+  a file's EOI cannot break a match). Adversarial collision hunt found no
+  false positives. On the re-imported cohort the scan hash merges 66 groups
+  that whole-file SHA-256 splits, recovering 67 assets, all 66 groups decoded
+  to pixel-identical images. THE PREMISE IS CONFIRMED ON THIS LIBRARY.
+- Task 3 COMPLETE (`07478d7`) — `pixel_hashes` (decoded-pixel SHA-256 with
+  dimensions mixed in, plus dhash/phash), orientation normalised via
+  `exif_transpose`, HEIC decoding verified on real files. Reviewed clean.
+- Task 4 COMPLETE (`3fcd683`) — `video_stream_hash` via
+  `ffmpeg -map 0:v -c copy -f md5`. Reviewed clean, no findings. Real
+  throughput ~780 MB/s, so all 141.6 GB of video hashes in ~3 minutes.
+- `src/photodedup/hashing.py` IS NOW FINISHED. This is a clean handoff point.
+- Task 5 NOT STARTED — `hash_stage.py`, the parallel resumable stage that
+  writes `asset_hash` rows, plus `photodedup hash` in cli.py.
+- Task 6 NOT STARTED — `grouping.py` and `photodedup group`.
+- Task 7 NOT STARTED — duplicate report and `photodedup duplicates`; ends
+  with the real run and recording the numbers here.
+
+Deferred minors for the final review's fix wave: the brief's
+`test_exif_orientation_is_normalised` sets Orientation=1 on both files and so
+cannot fail; replace with an asymmetric image and a real rotation.
 
 Tasks 2, 3 and 4 all append to `src/photodedup/hashing.py`, and Tasks 5, 6
 and 7 each append a command to `cli.py`, so this phase must run strictly
