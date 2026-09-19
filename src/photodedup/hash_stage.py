@@ -12,7 +12,13 @@ from pathlib import Path
 from sqlite3 import Connection
 
 from photodedup.catalog import set_stage
-from photodedup.hashing import jpeg_scan_hash, pixel_hashes, real_length, video_stream_hash
+from photodedup.hashing import (
+    jpeg_is_truncated,
+    jpeg_scan_hash,
+    pixel_hashes,
+    real_length,
+    video_stream_hash,
+)
 
 BATCH = 200
 
@@ -29,6 +35,22 @@ class HashResult:
     no_original: int
     errors: int
     truncated: int = 0
+
+
+def _truncated_row(
+    uuid: str, partial: object, bytes_read: int
+) -> dict:
+    """Construct a truncated-file row from partial hashes and real byte count."""
+    return {
+        "uuid": uuid,
+        "status": "truncated",
+        "pixel_hash": partial.pixel_hash,
+        "dhash": partial.dhash,
+        "phash": partial.phash,
+        "pixel_width": partial.width,
+        "pixel_height": partial.height,
+        "bytes_read": bytes_read,
+    }
 
 
 def hash_one(uuid: str, path: str | None, kind: str, uti: str | None) -> dict:
@@ -55,6 +77,17 @@ def hash_one(uuid: str, path: str | None, kind: str, uti: str | None) -> dict:
     except OSError as exc:
         return {"uuid": uuid, "status": "error", "error": f"unreadable: {exc}"}
 
+    if jpeg_is_truncated(data):
+        # No EOI after the scan: the file was cut short. Zero bytes may have
+        # been appended later (the FUJI and 2016 files in this library), and
+        # libjpeg will happily decode those as image data, so decode only the
+        # real prefix and never trust a strict decode here.
+        real = real_length(data)
+        partial = pixel_hashes(target, lenient=True, data=data[:real])
+        if partial is None:
+            return {"uuid": uuid, "status": "error", "error": "no usable hash"}
+        return _truncated_row(uuid, partial, real)
+
     row["bytes_read"] = len(data)
     # Only a JPEG has a scan to hash. Running the parser over a PNG or HEIC
     # just returns None after a wasted pass, and a file whose uti says PNG but
@@ -75,16 +108,7 @@ def hash_one(uuid: str, path: str | None, kind: str, uti: str | None) -> dict:
         partial = pixel_hashes(target, lenient=True)
         if partial is None:
             return {"uuid": uuid, "status": "error", "error": "no usable hash"}
-        return {
-            "uuid": uuid,
-            "status": "truncated",
-            "pixel_hash": partial.pixel_hash,
-            "dhash": partial.dhash,
-            "phash": partial.phash,
-            "pixel_width": partial.width,
-            "pixel_height": partial.height,
-            "bytes_read": real_length(data),
-        }
+        return _truncated_row(uuid, partial, real_length(data))
     return row
 
 

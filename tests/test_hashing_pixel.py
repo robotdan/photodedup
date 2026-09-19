@@ -1,7 +1,7 @@
 import pytest
 from PIL import Image, ImageFile
 
-from photodedup.hashing import pixel_hashes, real_length
+from photodedup.hashing import jpeg_is_truncated, pixel_hashes, real_length
 
 
 def make(path, colour="red", size=(64, 48), fmt=None):
@@ -139,3 +139,83 @@ def test_real_length_of_zero_padded_truncation_matches_unpadded(tmp_path):
     plain = data[: eoi - 200]
     padded = data[: eoi - 200] + b"\x00" * 5000
     assert real_length(padded) == real_length(plain)
+
+
+def test_jpeg_is_truncated_detects_cut_scan():
+    """Truncation: cut 200 bytes before EOI (no EOI after SOS)."""
+    img = Image.effect_noise((96, 64), 64).convert("RGB")
+    import tempfile
+    from pathlib import Path
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        intact = tmp_path / "intact.jpg"
+        img.save(intact, quality=95)
+        data = intact.read_bytes()
+        eoi = data.rfind(b"\xff\xd9")
+
+        truncated = data[: eoi - 200]
+        assert jpeg_is_truncated(truncated) is True
+
+
+def test_jpeg_is_truncated_ignores_zero_padding():
+    """Truncation still detected with trailing zeros."""
+    img = Image.effect_noise((96, 64), 64).convert("RGB")
+    import tempfile
+    from pathlib import Path
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        intact = tmp_path / "intact.jpg"
+        img.save(intact, quality=95)
+        data = intact.read_bytes()
+        eoi = data.rfind(b"\xff\xd9")
+
+        truncated_padded = data[: eoi - 200] + b"\x00" * 300
+        assert jpeg_is_truncated(truncated_padded) is True
+
+
+def test_jpeg_is_truncated_allows_trailing_junk():
+    """Intact JPEG with trailing data is not truncated."""
+    img = Image.effect_noise((96, 64), 64).convert("RGB")
+    import tempfile
+    from pathlib import Path
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        intact = tmp_path / "intact.jpg"
+        img.save(intact, quality=95)
+        data = intact.read_bytes()
+
+        with_junk = data + b"ftypmp4 junk" * 50
+        assert jpeg_is_truncated(with_junk) is False
+
+
+def test_jpeg_is_truncated_catches_header_truncation():
+    """Truncation in headers (first 40 bytes only)."""
+    img = Image.effect_noise((96, 64), 64).convert("RGB")
+    import tempfile
+    from pathlib import Path
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        intact = tmp_path / "intact.jpg"
+        img.save(intact, quality=95)
+        data = intact.read_bytes()
+
+        assert jpeg_is_truncated(data[:40]) is True
+
+
+def test_jpeg_is_truncated_rejects_non_jpeg():
+    """Non-JPEG data returns False (not this kind of damaged)."""
+    assert jpeg_is_truncated(b"\x89PNG...") is False
+    assert jpeg_is_truncated(b"") is False
+
+
+def test_lenient_decode_from_bytes_matches_path(tmp_path):
+    """Decoding from bytes gives same result as decoding from path."""
+    truncated = make_truncated_jpeg(tmp_path / "t.jpg")
+    data = truncated.read_bytes()
+
+    from_path = pixel_hashes(truncated, lenient=True)
+    from_bytes = pixel_hashes(truncated, lenient=True, data=data)
+
+    assert from_path.pixel_hash == from_bytes.pixel_hash
+    assert from_path.dhash == from_bytes.dhash
+    assert from_path.phash == from_bytes.phash

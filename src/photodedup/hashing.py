@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -93,6 +94,47 @@ def jpeg_scan_hash(data: bytes) -> str | None:
     return None
 
 
+def jpeg_is_truncated(data: bytes) -> bool:
+    """True when *data* is a JPEG whose entropy-coded data has no EOI after it.
+
+    Walks the segment structure so the EOI of an embedded EXIF thumbnail
+    (inside APP1, before SOS) is never mistaken for the image's own, and so
+    bytes after a real EOI (a motion photo's MP4 trailer, zero padding) are
+    never mistaken for a missing one. A segment length that overruns the
+    buffer is also truncation: the file was cut inside its headers. Anything
+    that is not a parseable JPEG returns False; it may be damaged, but it is
+    not *this* kind of damaged.
+    """
+    if len(data) < 4 or data[0] != 0xFF or data[1] != _SOI:
+        return False
+    i = 2
+    n = len(data)
+    while i < n:
+        if data[i] != 0xFF:
+            return False
+        while i < n and data[i] == 0xFF:
+            i += 1
+        if i >= n:
+            return True
+        marker = data[i]
+        i += 1
+        if marker == _EOI:
+            return False
+        if marker in _STANDALONE:
+            continue
+        if i + 2 > n:
+            return True
+        length = int.from_bytes(data[i : i + 2], "big")
+        if length < 2:
+            return False
+        if i + length > n:
+            return True
+        i += length
+        if marker == _SOS:
+            return data.find(b"\xff\xd9", i) < 0
+    return True
+
+
 @dataclass(frozen=True)
 class PixelHashes:
     pixel_hash: str
@@ -113,7 +155,9 @@ def real_length(data: bytes) -> int:
     return len(data.rstrip(b"\x00"))
 
 
-def pixel_hashes(path: Path, *, lenient: bool = False) -> PixelHashes | None:
+def pixel_hashes(
+    path: Path, *, lenient: bool = False, data: bytes | None = None
+) -> PixelHashes | None:
     """Decode *path* once and derive every pixel-based signal from it.
 
     Returns None when the file cannot be decoded, which the hash stage records
@@ -123,11 +167,15 @@ def pixel_hashes(path: Path, *, lenient: bool = False) -> PixelHashes | None:
     is how a truncated file still yields perceptual hashes. The flag is a
     Pillow process global; it is set and restored around the decode so a
     strict call in the same process stays strict.
+
+    *data*, when given, is decoded instead of the file at *path*; the truncated
+    path uses it to decode only the real bytes of a zero-padded file.
     """
     previous = ImageFile.LOAD_TRUNCATED_IMAGES
     ImageFile.LOAD_TRUNCATED_IMAGES = lenient
     try:
-        with Image.open(path) as image:
+        source = io.BytesIO(data) if data is not None else path
+        with Image.open(source) as image:
             # An orientation flag is metadata. Compare what is displayed.
             image = ImageOps.exif_transpose(image)
             rgb = image.convert("RGB")

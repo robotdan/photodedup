@@ -180,7 +180,7 @@ def make_truncated(path):
     intact = path.with_name("intact_" + path.name)
     Image.effect_noise((96, 64), 64).convert("RGB").save(intact, quality=95)
     data = intact.read_bytes()
-    path.write_bytes(data[: data.rfind(b"\xff\xd9") - 200])
+    path.write_bytes(data[: data.rfind(b"\xff\xd9") - 200] + b"\x00" * 300)
     return path
 
 
@@ -210,3 +210,40 @@ def test_run_hash_counts_truncated_and_does_not_rehash_it(conn, tmp_path):
     second = run_hash(conn, workers=1)
     assert second.total == 0
     assert second.already_done == 1
+
+
+def test_truncated_unpadded_jpeg_is_reported_truncated(tmp_path):
+    """Shape (a): truncated without zero-fill; fail strict, recover with lenient."""
+    intact = tmp_path / "intact.jpg"
+    Image.effect_noise((96, 64), 64).convert("RGB").save(intact, quality=95)
+    data = intact.read_bytes()
+
+    truncated_path = tmp_path / "t.jpg"
+    truncated_path.write_bytes(data[: data.rfind(b"\xff\xd9") - 200])
+
+    row = hash_one("u1", str(truncated_path), "image", "public.jpeg")
+    assert row["status"] == "truncated"
+    assert row.get("scan_hash") is None
+    assert row["dhash"] and row["phash"] and row["pixel_hash"]
+    assert row["bytes_read"] == len(truncated_path.read_bytes())
+
+
+def test_intact_jpeg_with_trailing_bytes_stays_ok(tmp_path):
+    """Motion photos and zero-padded intact files are still ok, not truncated."""
+    intact = tmp_path / "intact.jpg"
+    Image.effect_noise((96, 64), 64).convert("RGB").save(intact, quality=95)
+    data = intact.read_bytes()
+
+    # Intact with zero padding
+    padded_zeros = tmp_path / "padded_zeros.jpg"
+    padded_zeros.write_bytes(data + b"\x00" * 300)
+
+    # Intact with motion photo MP4 trailer
+    padded_mp4 = tmp_path / "motion_photo.jpg"
+    padded_mp4.write_bytes(data + b"ftypmp4 junk" * 50)
+
+    for path in [padded_zeros, padded_mp4]:
+        row = hash_one("u1", str(path), "image", "public.jpeg")
+        assert row["status"] == "ok", f"Failed for {path.name}"
+        assert row.get("scan_hash") is not None, f"No scan hash for {path.name}"
+        assert row["dhash"] and row["phash"] and row["pixel_hash"]
