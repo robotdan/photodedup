@@ -187,7 +187,13 @@ def test_cohort_a_recovery_is_visible_in_the_report(conn):
     assert "| EXIF usable, Photos date rejected (recoverable from EXIF) | 1 |" in report
 
 
-def test_sentinel_breakdown_splits_by_value_and_source(conn):
+def test_sentinel_breakdown_splits_by_day_and_source(conn):
+    """A clock-reset run is one event and must render as one row, not hundreds.
+
+    A camera whose clock resets keeps counting from the epoch, so every photo in
+    the run carries a distinct second. Grouping by exact value turned a single
+    reset into a row per photo.
+    """
     records = [
         asset("s1", added=ADDED, photos_date=datetime(2001, 1, 1, 4, 0, 0)),
         asset("s2", added=ADDED, photos_date=datetime(2001, 1, 1, 5, 0, 0)),
@@ -195,10 +201,10 @@ def test_sentinel_breakdown_splits_by_value_and_source(conn):
     ]
     survey(conn, records)
     rows = sentinel_breakdown(conn)
-    assert ("photos_db", "1970-01-01T00:00:00", 1) in rows
-    assert ("photos_db", "2001-01-01T04:00:00", 1) in rows
+    assert ("photos_db", "2001-01-01", 2) in rows
+    assert ("photos_db", "1970-01-01", 1) in rows
     assert [r[2] for r in rows] == sorted([r[2] for r in rows], reverse=True)
-    assert "Sentinel rejections by value" in survey_report(conn)
+    assert "Sentinel rejections by day" in survey_report(conn)
 
 
 def test_photos_date_clusters_find_collapsed_capture_dates(conn):

@@ -139,18 +139,23 @@ def sentinel_breakdown(conn: Connection) -> list[tuple[str, str, int]]:
     Aggregate sentinel counts hide the only ambiguous sentinel: 2001-01-01 is
     Apple's reference epoch but is also a date a photo can really be taken on.
     This is what makes that bucket visible for individual inspection.
+
+    Grouped by DAY rather than by exact timestamp. A camera whose clock reset
+    keeps counting from the epoch, so a reset run yields one distinct value per
+    second; grouping by value rendered such a run as hundreds of single-asset
+    rows, burying the fact that they are one event.
     """
     rows = conn.execute(
         """
-        SELECT c.source AS source, c.value AS value, COUNT(*) AS n
+        SELECT c.source AS source, substr(c.value, 1, 10) AS day, COUNT(*) AS n
         FROM date_candidate c
         JOIN asset a ON a.uuid = c.uuid AND a.survey_status = 'ok'
         WHERE c.rejected_reason = 'sentinel'
-        GROUP BY c.source, c.value
-        ORDER BY n DESC, c.source ASC, c.value ASC
+        GROUP BY c.source, day
+        ORDER BY n DESC, c.source ASC, day ASC
         """
     ).fetchall()
-    return [(row["source"], row["value"], row["n"]) for row in rows]
+    return [(row["source"], row["day"], row["n"]) for row in rows]
 
 
 def timezone_artifacts(conn: Connection) -> int:
@@ -287,11 +292,11 @@ def survey_report(conn: Connection) -> str:
         "rejected Photos date alongside a usable EXIF date counts the assets",
         "whose true capture date is still recoverable from the file itself.\n",
         _table(("case", "assets"), cross),
-        "\n## Sentinel rejections by value\n",
+        "\n## Sentinel rejections by day\n",
         "1970, 1980, 1904 and 1899 are software defaults and are never real",
         "here. 2001-01-01 is Apple's reference epoch but is also a plausible",
         "capture date; inspect that bucket individually before trusting it.\n",
-        _table(("source", "value", "count"), sentinels),
+        _table(("source", "day", "assets"), sentinels),
         "\n## Date agreement\n",
         _table(
             ("measure", "count"),
