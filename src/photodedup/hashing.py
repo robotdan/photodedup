@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import imagehash
-from PIL import Image, ImageOps
+from PIL import Image, ImageFile, ImageOps
 
 try:  # HEIC support; the library holds 6,678 of them.
     import pillow_heif
@@ -102,12 +102,30 @@ class PixelHashes:
     height: int
 
 
-def pixel_hashes(path: Path) -> PixelHashes | None:
+def real_length(data: bytes) -> int:
+    """Length of *data* with trailing zero bytes stripped.
+
+    A truncated file that was later zero-filled to its original size (the
+    2003 FUJI files and both 2016 files in this library) carries its real
+    content in a prefix; this is that prefix's length, and it is what the
+    group stage compares against an intact partner.
+    """
+    return len(data.rstrip(b"\x00"))
+
+
+def pixel_hashes(path: Path, *, lenient: bool = False) -> PixelHashes | None:
     """Decode *path* once and derive every pixel-based signal from it.
 
     Returns None when the file cannot be decoded, which the hash stage records
     as an error rather than letting it abort a 65,974-asset run.
+
+    With *lenient* the decoder tolerates a missing tail (no EOI marker), which
+    is how a truncated file still yields perceptual hashes. The flag is a
+    Pillow process global; it is set and restored around the decode so a
+    strict call in the same process stays strict.
     """
+    previous = ImageFile.LOAD_TRUNCATED_IMAGES
+    ImageFile.LOAD_TRUNCATED_IMAGES = lenient
     try:
         with Image.open(path) as image:
             # An orientation flag is metadata. Compare what is displayed.
@@ -126,6 +144,8 @@ def pixel_hashes(path: Path) -> PixelHashes | None:
             )
     except Exception:
         return None
+    finally:
+        ImageFile.LOAD_TRUNCATED_IMAGES = previous
 
 
 def video_stream_hash(

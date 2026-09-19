@@ -1,7 +1,7 @@
 import pytest
-from PIL import Image
+from PIL import Image, ImageFile
 
-from photodedup.hashing import pixel_hashes
+from photodedup.hashing import pixel_hashes, real_length
 
 
 def make(path, colour="red", size=(64, 48), fmt=None):
@@ -86,3 +86,56 @@ def test_exif_orientation_is_normalised(tmp_path):
     )
 
     assert pixel_hashes(b).pixel_hash == pixel_hashes(a).pixel_hash
+
+
+def make_noisy_jpeg(path):
+    """A JPEG with a large entropy-coded segment, so cutting 200 bytes before
+    EOI leaves a decodable but incomplete scan. A flat-colour image has a scan
+    only a few bytes long and would be cut into the headers instead."""
+    Image.effect_noise((96, 64), 64).convert("RGB").save(path, quality=95)
+    return path
+
+
+def make_truncated_jpeg(path, *, pad=0):
+    intact = make_noisy_jpeg(path.with_name("intact_" + path.name))
+    data = intact.read_bytes()
+    eoi = data.rfind(b"\xff\xd9")
+    assert eoi > 400
+    path.write_bytes(data[: eoi - 200] + b"\x00" * pad)
+    return path
+
+
+def test_strict_decode_refuses_a_truncated_jpeg(tmp_path):
+    assert pixel_hashes(make_truncated_jpeg(tmp_path / "t.jpg")) is None
+
+
+def test_lenient_decode_hashes_a_truncated_jpeg(tmp_path):
+    hashes = pixel_hashes(make_truncated_jpeg(tmp_path / "t.jpg"), lenient=True)
+    assert hashes is not None
+    assert (hashes.width, hashes.height) == (96, 64)
+    assert hashes.dhash and hashes.phash and hashes.pixel_hash
+
+
+def test_lenient_flag_does_not_leak(tmp_path):
+    pixel_hashes(make_truncated_jpeg(tmp_path / "t.jpg"), lenient=True)
+    assert ImageFile.LOAD_TRUNCATED_IMAGES is False
+    assert pixel_hashes(tmp_path / "t.jpg") is None
+
+
+def test_real_length_strips_trailing_zeros():
+    assert real_length(b"abc\x00\x00") == 3
+    assert real_length(b"abc") == 3
+    assert real_length(b"\x00\x00") == 0
+    assert real_length(b"") == 0
+
+
+def test_real_length_of_zero_padded_truncation_matches_unpadded(tmp_path):
+    # Create one intact JPEG and reuse it for both truncations
+    intact = make_noisy_jpeg(tmp_path / "intact.jpg")
+    data = intact.read_bytes()
+    eoi = data.rfind(b"\xff\xd9")
+    assert eoi > 400
+
+    plain = data[: eoi - 200]
+    padded = data[: eoi - 200] + b"\x00" * 5000
+    assert real_length(padded) == real_length(plain)

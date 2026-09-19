@@ -4,7 +4,8 @@ import pytest
 from PIL import Image
 
 from photodedup.catalog import open_catalog
-from photodedup.hash_stage import HashStageInterrupted, run_hash
+from photodedup.hash_stage import HashStageInterrupted, hash_one, run_hash
+from photodedup.hashing import real_length
 
 ADDED = datetime(2020, 12, 18, 9, 12, 48)
 
@@ -173,3 +174,39 @@ def test_a_dead_worker_pool_is_resumable(conn, tmp_path, monkeypatch):
 
     # The asset was never hashed, so a normal re-run still picks it up.
     assert run_hash(conn, workers=1).hashed == 1
+
+
+def make_truncated(path):
+    intact = path.with_name("intact_" + path.name)
+    Image.effect_noise((96, 64), 64).convert("RGB").save(intact, quality=95)
+    data = intact.read_bytes()
+    path.write_bytes(data[: data.rfind(b"\xff\xd9") - 200])
+    return path
+
+
+def test_hash_one_reports_truncated_with_perceptual_hashes(tmp_path):
+    path = make_truncated(tmp_path / "t.jpg")
+    row = hash_one("u1", str(path), "image", "public.jpeg")
+    assert row["status"] == "truncated"
+    assert row.get("scan_hash") is None
+    assert row["dhash"] and row["phash"] and row["pixel_hash"]
+    assert (row["pixel_width"], row["pixel_height"]) == (96, 64)
+    assert row["bytes_read"] == real_length(path.read_bytes())
+
+
+def test_hash_one_still_errors_on_a_non_image(tmp_path):
+    path = tmp_path / "fake.png"
+    path.write_bytes(b'{"normalImage": "iVBOR..."}')
+    row = hash_one("u1", str(path), "image", "public.png")
+    assert row["status"] == "error"
+    assert row["error"] == "no usable hash"
+
+
+def test_run_hash_counts_truncated_and_does_not_rehash_it(conn, tmp_path):
+    add_asset(conn, "u1", path=make_truncated(tmp_path / "t.jpg"))
+    first = run_hash(conn, workers=1)
+    assert first.truncated == 1
+    assert first.errors == 0
+    second = run_hash(conn, workers=1)
+    assert second.total == 0
+    assert second.already_done == 1

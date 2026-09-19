@@ -12,7 +12,7 @@ from pathlib import Path
 from sqlite3 import Connection
 
 from photodedup.catalog import set_stage
-from photodedup.hashing import jpeg_scan_hash, pixel_hashes, video_stream_hash
+from photodedup.hashing import jpeg_scan_hash, pixel_hashes, real_length, video_stream_hash
 
 BATCH = 200
 
@@ -28,6 +28,7 @@ class HashResult:
     already_done: int
     no_original: int
     errors: int
+    truncated: int = 0
 
 
 def hash_one(uuid: str, path: str | None, kind: str, uti: str | None) -> dict:
@@ -69,7 +70,21 @@ def hash_one(uuid: str, path: str | None, kind: str, uti: str | None) -> dict:
         row["pixel_height"] = pixels.height
 
     if row.get("scan_hash") is None and pixels is None:
-        return {"uuid": uuid, "status": "error", "error": "no usable hash"}
+        # Neither signal: either the file is not an image at all, or it is a
+        # JPEG cut short before its EOI. Only the second decodes leniently.
+        partial = pixel_hashes(target, lenient=True)
+        if partial is None:
+            return {"uuid": uuid, "status": "error", "error": "no usable hash"}
+        return {
+            "uuid": uuid,
+            "status": "truncated",
+            "pixel_hash": partial.pixel_hash,
+            "dhash": partial.dhash,
+            "phash": partial.phash,
+            "pixel_width": partial.width,
+            "pixel_height": partial.height,
+            "bytes_read": real_length(data),
+        }
     return row
 
 
@@ -106,7 +121,7 @@ def run_hash(
     set_stage(conn, "hash", "running")
 
     already = conn.execute(
-        "SELECT COUNT(*) AS n FROM asset_hash WHERE status IN ('ok', 'no_original')"
+        "SELECT COUNT(*) AS n FROM asset_hash WHERE status IN ('ok', 'no_original', 'truncated')"
     ).fetchone()["n"]
 
     todo = conn.execute(
@@ -122,7 +137,7 @@ def run_hash(
     if limit is not None:
         todo = todo[:limit]
 
-    hashed = no_original = errors = 0
+    hashed = no_original = errors = truncated = 0
     total = len(todo)
     if total == 0:
         set_stage(conn, "hash", "complete", notes="nothing to do")
@@ -132,10 +147,12 @@ def run_hash(
     done = 0
 
     def record(row: dict) -> None:
-        nonlocal hashed, no_original, errors
+        nonlocal hashed, no_original, errors, truncated
         _write(conn, row)
         if row["status"] == "ok":
             hashed += 1
+        elif row["status"] == "truncated":
+            truncated += 1
         elif row["status"] == "no_original":
             no_original += 1
         else:
@@ -179,6 +196,6 @@ def run_hash(
     conn.commit()
     set_stage(
         conn, "hash", "complete",
-        notes=f"{hashed} hashed, {no_original} without originals, {errors} errors",
+        notes=f"{hashed} hashed, {truncated} truncated, {no_original} without originals, {errors} errors",
     )
-    return HashResult(total, hashed, already, no_original, errors)
+    return HashResult(total, hashed, already, no_original, errors, truncated)
