@@ -7,8 +7,8 @@ from pathlib import Path
 import click
 
 from photodedup.catalog import open_catalog
-from photodedup.grouping import run_group
-from photodedup.hash_stage import run_hash
+from photodedup.grouping import HashStageIncomplete, run_group
+from photodedup.hash_stage import HashStageInterrupted, run_hash
 from photodedup.library import LibraryUnavailable, iter_assets
 from photodedup.report import duplicate_report, survey_report
 from photodedup.survey import (
@@ -100,12 +100,15 @@ def report(catalog: Path, out: Path) -> None:
 def hash(catalog: Path, workers: int | None, limit: int | None) -> None:
     """Compute content hashes for every surveyed asset. Read-only, resumable."""
     conn = open_catalog(catalog)
-    result = run_hash(
-        conn,
-        workers=workers,
-        limit=limit,
-        progress=lambda done, total: click.echo(f"  {done}/{total}", err=True),
-    )
+    try:
+        result = run_hash(
+            conn,
+            workers=workers,
+            limit=limit,
+            progress=lambda done, total: click.echo(f"  {done}/{total}", err=True),
+        )
+    except HashStageInterrupted as exc:
+        raise click.ClickException(str(exc)) from exc
     click.echo(
         f"{result.total} assets to hash "
         f"({result.hashed} hashed, {result.no_original} without originals, "
@@ -117,14 +120,23 @@ def hash(catalog: Path, workers: int | None, limit: int | None) -> None:
 @click.option(
     "--catalog", type=click.Path(path_type=Path), default=DEFAULT_CATALOG, show_default=True
 )
-def group(catalog: Path) -> None:
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Group even though the hash stage has not reported complete.",
+)
+def group(catalog: Path, force: bool) -> None:
     """Form duplicate groups from the content hashes. Decides nothing."""
     conn = open_catalog(catalog)
-    result = run_group(conn)
+    try:
+        result = run_group(conn, force=force)
+    except HashStageIncomplete as exc:
+        raise click.ClickException(str(exc)) from exc
     click.echo(
         f"{result.groups} groups covering {result.members} assets; "
-        f"{result.removable} removable if every group keeps one; per signal — "
-        f"see `photodedup duplicates` for the de-duplicated count"
+        f"{result.removable} removable if every group keeps one (per signal, "
+        f"over-counts pairs found twice; see `photodedup duplicates` for the "
+        f"de-duplicated count)"
     )
 
 

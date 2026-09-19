@@ -2,29 +2,40 @@ from datetime import datetime
 
 import pytest
 
-from photodedup.catalog import open_catalog
+from photodedup.catalog import open_catalog, set_stage
 from photodedup.grouping import run_group
-from photodedup.report import cohort_pairs, duplicate_report, exact_components, signal_overlap
+from photodedup.report import (
+    cohort_pairs,
+    coverage,
+    duplicate_report,
+    exact_components,
+    groups_with_size_spread,
+    signal_overlap,
+)
 
 
 @pytest.fixture
 def conn(tmp_path):
-    return open_catalog(tmp_path / "catalog.sqlite")
+    """A catalog whose hash stage has reported complete, as `run_group` demands."""
+    conn = open_catalog(tmp_path / "catalog.sqlite")
+    set_stage(conn, "hash", "complete")
+    return conn
 
 
 def add(conn, uuid, *, scan=None, pixel=None, dhash=None, photos_date=None,
-        filename="x.jpg", size=1000):
+        filename="x.jpg", size=1000, status="ok", hashed=True):
     conn.execute(
-        """INSERT INTO asset (uuid, kind, has_raw, survey_status, original_filename,
+        """INSERT INTO asset (uuid, kind, uti, has_raw, survey_status, original_filename,
                               photos_date, file_size, width, height)
-           VALUES (?, 'image', 0, 'ok', ?, ?, ?, 100, 100)""",
+           VALUES (?, 'image', 'public.jpeg', 0, 'ok', ?, ?, ?, 100, 100)""",
         (uuid, filename, photos_date.isoformat() if photos_date else None, size),
     )
-    conn.execute(
-        """INSERT INTO asset_hash (uuid, status, scan_hash, pixel_hash, dhash)
-           VALUES (?, 'ok', ?, ?, ?)""",
-        (uuid, scan, pixel, dhash),
-    )
+    if hashed:
+        conn.execute(
+            """INSERT INTO asset_hash (uuid, status, scan_hash, pixel_hash, dhash)
+               VALUES (?, ?, ?, ?, ?)""",
+            (uuid, status, scan, pixel, dhash),
+        )
     conn.commit()
 
 
@@ -87,3 +98,72 @@ def test_exact_components_counts_disjoint_pairs_separately(conn):
     add(conn, "u4", scan="ccc")
     run_group(conn)
     assert exact_components(conn) == (2, 4, 2)
+
+
+def test_coverage_counts_every_state_of_every_asset(conn):
+    add(conn, "ok1", scan="aaa")           # hashed ok, grouped
+    add(conn, "ok2", scan="aaa")           # hashed ok, grouped
+    add(conn, "lonely", scan="zzz")        # hashed ok, in no group
+    add(conn, "bad", status="error")       # hash error
+    add(conn, "gone", status="no_original")
+    add(conn, "later", hashed=False)       # not yet attempted
+    run_group(conn)
+    assert coverage(conn) == [
+        ("assets surveyed ok", 6),
+        ("hashed ok", 3),
+        ("hash errors", 1),
+        ("no local original", 1),
+        ("not yet attempted", 1),
+        ("hashed ok but in no group", 1),
+    ]
+
+
+def test_report_leads_with_coverage_before_any_removable_number(conn):
+    add(conn, "u1", scan="aaa")
+    add(conn, "u2", scan="aaa")
+    run_group(conn)
+    text = duplicate_report(conn)
+    assert text.index("## Coverage") < text.index("Removable on exact signals")
+    assert "not yet attempted" in text
+    assert "the numbers below are partial" in text
+
+
+def test_groups_with_size_spread_finds_a_stripped_motion_photo(conn):
+    add(conn, "full", scan="aaa", size=5_000_000)
+    add(conn, "stripped", scan="aaa", size=1_200_000)
+    run_group(conn)
+    assert groups_with_size_spread(conn) == 1
+    assert groups_with_size_spread(conn, min_spread=10_000_000) == 0
+
+
+def test_groups_with_size_spread_ignores_same_sized_members(conn):
+    add(conn, "u1", scan="aaa", size=1000)
+    add(conn, "u2", scan="aaa", size=1000)
+    run_group(conn)
+    assert groups_with_size_spread(conn) == 0
+
+
+def test_sample_groups_render_their_size_spread(conn):
+    add(conn, "full", scan="aaa", size=5_000_000)
+    add(conn, "stripped", scan="aaa", size=1_200_000)
+    run_group(conn)
+    assert "size spread: 3800000 bytes" in duplicate_report(conn)
+
+
+def test_exact_components_all_tiers_includes_candidates(conn):
+    add(conn, "u1", scan="aaa")
+    add(conn, "u2", scan="aaa")
+    add(conn, "u3", dhash="dddd")
+    add(conn, "u4", dhash="dddd")
+    run_group(conn)
+    assert exact_components(conn) == (1, 2, 1)
+    assert exact_components(conn, all_tiers=True) == (2, 4, 2)
+
+
+def test_report_pluralises_a_single_set(conn):
+    add(conn, "u1", scan="aaa")
+    add(conn, "u2", scan="aaa")
+    run_group(conn)
+    text = duplicate_report(conn)
+    assert "in 1 set)" in text
+    assert "in 1 sets" not in text

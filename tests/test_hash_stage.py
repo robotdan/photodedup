@@ -4,7 +4,7 @@ import pytest
 from PIL import Image
 
 from photodedup.catalog import open_catalog
-from photodedup.hash_stage import run_hash
+from photodedup.hash_stage import HashStageInterrupted, run_hash
 
 ADDED = datetime(2020, 12, 18, 9, 12, 48)
 
@@ -119,3 +119,57 @@ def test_limit_caps_the_work(conn, tmp_path):
         add_asset(conn, f"u{i}", path=make_jpeg(tmp_path / f"{i}.jpg"))
     result = run_hash(conn, workers=1, limit=2)
     assert result.hashed == 2
+
+
+def test_skipped_rows_are_retried(conn, tmp_path):
+    """'skipped' is a legal status no writer sets; it must not be a black hole."""
+    add_asset(conn, "u1", path=make_jpeg(tmp_path / "a.jpg"))
+    conn.execute("INSERT INTO asset_hash (uuid, status) VALUES ('u1', 'skipped')")
+    conn.commit()
+    result = run_hash(conn, workers=1)
+    assert result.hashed == 1
+    assert conn.execute(
+        "SELECT status FROM asset_hash WHERE uuid='u1'"
+    ).fetchone()["status"] == "ok"
+
+
+def test_scan_hash_is_only_computed_for_jpeg_utis(conn, tmp_path):
+    """A JPEG filed under the wrong uti is a mislabelled file, not a match."""
+    add_asset(conn, "u1", path=make_jpeg(tmp_path / "a.jpg"), uti="public.png")
+    run_hash(conn, workers=1)
+    row = conn.execute("SELECT * FROM asset_hash WHERE uuid='u1'").fetchone()
+    assert row["status"] == "ok"
+    assert row["scan_hash"] is None
+    assert row["pixel_hash"]
+
+
+def test_a_dead_worker_pool_is_resumable(conn, tmp_path, monkeypatch):
+    from concurrent.futures.process import BrokenProcessPool
+
+    from photodedup import hash_stage
+
+    class DeadPool:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def submit(self, *args, **kwargs):
+            raise BrokenProcessPool("a worker died")
+
+    monkeypatch.setattr(hash_stage, "ProcessPoolExecutor", DeadPool)
+    add_asset(conn, "u1", path=make_jpeg(tmp_path / "a.jpg"))
+
+    with pytest.raises(HashStageInterrupted) as exc:
+        run_hash(conn, workers=2)
+    assert "resumable" in str(exc.value)
+
+    stage = conn.execute("SELECT * FROM stage WHERE name='hash'").fetchone()
+    assert stage["status"] == "failed"
+
+    # The asset was never hashed, so a normal re-run still picks it up.
+    assert run_hash(conn, workers=1).hashed == 1

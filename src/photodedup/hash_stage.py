@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -14,6 +15,10 @@ from photodedup.catalog import set_stage
 from photodedup.hashing import jpeg_scan_hash, pixel_hashes, video_stream_hash
 
 BATCH = 200
+
+
+class HashStageInterrupted(RuntimeError):
+    """A worker pool died mid-run. Everything already written is kept."""
 
 
 @dataclass(frozen=True)
@@ -50,7 +55,10 @@ def hash_one(uuid: str, path: str | None, kind: str, uti: str | None) -> dict:
         return {"uuid": uuid, "status": "error", "error": f"unreadable: {exc}"}
 
     row["bytes_read"] = len(data)
-    row["scan_hash"] = jpeg_scan_hash(data)
+    # Only a JPEG has a scan to hash. Running the parser over a PNG or HEIC
+    # just returns None after a wasted pass, and a file whose uti says PNG but
+    # whose bytes start with SOI is a mislabelled file, not a JPEG match.
+    row["scan_hash"] = jpeg_scan_hash(data) if uti == "public.jpeg" else None
 
     pixels = pixel_hashes(target)
     if pixels is not None:
@@ -107,7 +115,7 @@ def run_hash(
         FROM asset a
         LEFT JOIN asset_hash h ON h.uuid = a.uuid
         WHERE a.survey_status = 'ok'
-          AND (h.uuid IS NULL OR h.status = 'error')
+          AND (h.uuid IS NULL OR h.status IN ('error', 'skipped'))
         ORDER BY a.uuid
         """
     ).fetchall()
@@ -142,18 +150,31 @@ def run_hash(
                 if progress:
                     progress(done, total)
     else:
-        with ProcessPoolExecutor(max_workers=workers) as pool:
-            futures = [
-                pool.submit(hash_one, r["uuid"], r["path"], r["kind"], r["uti"])
-                for r in todo
-            ]
-            for future in futures:
-                record(future.result())
-                done += 1
-                if done % BATCH == 0:
-                    conn.commit()
-                    if progress:
-                        progress(done, total)
+        try:
+            with ProcessPoolExecutor(max_workers=workers) as pool:
+                futures = [
+                    pool.submit(hash_one, r["uuid"], r["path"], r["kind"], r["uti"])
+                    for r in todo
+                ]
+                for future in futures:
+                    record(future.result())
+                    done += 1
+                    if done % BATCH == 0:
+                        conn.commit()
+                        if progress:
+                            progress(done, total)
+        except BrokenProcessPool as exc:
+            # A worker died (OOM killer, a segfault in an image decoder). Keep
+            # every row already recorded so the next run resumes rather than
+            # starting the 65,974-asset pass again.
+            conn.commit()
+            note = f"worker pool died after {done} of {total}: {exc}"
+            set_stage(conn, "hash", "failed", notes=note)
+            raise HashStageInterrupted(
+                f"the worker pool died after {done} of {total} assets. Everything "
+                "hashed so far is committed, so the run is resumable: re-run "
+                "`photodedup hash` (optionally with fewer --workers) to continue."
+            ) from exc
 
     conn.commit()
     set_stage(

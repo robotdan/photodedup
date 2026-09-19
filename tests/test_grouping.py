@@ -1,20 +1,27 @@
 import pytest
 
-from photodedup.catalog import open_catalog
-from photodedup.grouping import run_group
+from photodedup.catalog import get_stage, open_catalog, set_stage
+from photodedup.grouping import HashStageIncomplete, run_group
 
 
 @pytest.fixture
 def conn(tmp_path):
-    return open_catalog(tmp_path / "catalog.sqlite")
+    """A catalog whose hash stage has reported complete.
+
+    `run_group` refuses to run otherwise, so every grouping test needs the
+    precondition satisfied before it can measure anything else.
+    """
+    conn = open_catalog(tmp_path / "catalog.sqlite")
+    set_stage(conn, "hash", "complete")
+    return conn
 
 
 def add(conn, uuid, *, kind="image", has_raw=0, scan=None, pixel=None,
-        video=None, dhash=None, status="ok"):
+        video=None, dhash=None, status="ok", uti="public.jpeg"):
     conn.execute(
-        """INSERT INTO asset (uuid, kind, has_raw, survey_status)
-           VALUES (?, ?, ?, 'ok')""",
-        (uuid, kind, has_raw),
+        """INSERT INTO asset (uuid, kind, has_raw, uti, survey_status)
+           VALUES (?, ?, ?, ?, 'ok')""",
+        (uuid, kind, has_raw, uti),
     )
     conn.execute(
         """INSERT INTO asset_hash (uuid, status, scan_hash, pixel_hash, video_hash, dhash)
@@ -111,3 +118,68 @@ def test_group_of_three_reports_two_removable(conn):
     result = run_group(conn)
     assert result.members == 3
     assert result.removable == 2
+
+
+GIF = "com.compuserve.gif"
+
+
+def test_animated_gifs_never_form_an_exact_group(conn):
+    """Frame 0 is not the file. Two animations can share a first frame."""
+    add(conn, "u1", pixel="ppp", uti=GIF)
+    add(conn, "u2", pixel="ppp", uti=GIF)
+    assert run_group(conn).groups == 0
+
+
+def test_animated_gifs_still_form_a_candidate_group(conn):
+    add(conn, "u1", dhash="dddd", uti=GIF)
+    add(conn, "u2", dhash="dddd", uti=GIF)
+    run_group(conn)
+    rows = groups(conn)
+    assert [(r["signal"], r["tier"]) for r in rows] == [("dhash", "candidate")]
+
+
+def test_webp_is_excluded_from_exact_groups_too(conn):
+    add(conn, "u1", pixel="ppp", uti="org.webmproject.webp")
+    add(conn, "u2", pixel="ppp", uti="org.webmproject.webp")
+    assert run_group(conn).groups == 0
+
+
+def test_jpegs_sharing_a_pixel_hash_still_group_exactly(conn):
+    add(conn, "u1", pixel="ppp")
+    add(conn, "u2", pixel="ppp")
+    result = run_group(conn)
+    assert result.groups == 1
+    assert groups(conn)[0]["tier"] == "exact"
+
+
+def test_assets_with_no_uti_still_group(conn):
+    """A missing uti must not be read as 'might be an animation'."""
+    add(conn, "u1", pixel="ppp", uti=None)
+    add(conn, "u2", pixel="ppp", uti=None)
+    assert run_group(conn).groups == 1
+
+
+def test_refuses_when_the_hash_stage_is_still_running(conn):
+    set_stage(conn, "hash", "running")
+    add(conn, "u1", scan="aaa")
+    add(conn, "u2", scan="aaa")
+    with pytest.raises(HashStageIncomplete) as exc:
+        run_group(conn)
+    assert "running" in str(exc.value)
+    assert "--force" in str(exc.value)
+    assert conn.execute("SELECT COUNT(*) AS n FROM dup_group").fetchone()["n"] == 0
+
+
+def test_refuses_when_the_hash_stage_never_ran(tmp_path):
+    fresh = open_catalog(tmp_path / "fresh.sqlite")
+    with pytest.raises(HashStageIncomplete):
+        run_group(fresh)
+
+
+def test_force_groups_a_partially_hashed_catalog(conn):
+    set_stage(conn, "hash", "running")
+    add(conn, "u1", scan="aaa")
+    add(conn, "u2", scan="aaa")
+    result = run_group(conn, force=True)
+    assert result.groups == 1
+    assert get_stage(conn, "group")["status"] == "complete"

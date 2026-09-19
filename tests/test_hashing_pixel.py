@@ -56,25 +56,33 @@ def test_missing_file_returns_none(tmp_path):
 
 
 def test_exif_orientation_is_normalised(tmp_path):
-    """An orientation flag is metadata; the displayed pixels are the image."""
-    import subprocess
+    """An orientation flag is metadata; the displayed pixels are the image.
+
+    The image has to be asymmetric and the second copy really rotated, or the
+    assertion holds for reasons that have nothing to do with the orientation
+    tag. PNG rather than JPEG: JPEG recompression leaves DCT noise that makes
+    two byte-different encodings of the same pixels hash differently.
+    """
     import shutil
+    import subprocess
 
     if shutil.which("exiftool") is None:
         pytest.skip("exiftool not installed")
 
-    a = tmp_path / "a.jpg"
-    b = tmp_path / "b.jpg"
-    Image.new("RGB", (64, 48), "red").save(a)
-    Image.open(a).save(b)
+    upright = Image.new("RGB", (64, 48), "red")
+    upright.paste(Image.new("RGB", (32, 48), "blue"), (32, 0))
+
+    a = tmp_path / "a.png"
+    b = tmp_path / "b.png"
+    upright.save(a)
+    # Orientation 6 means "rotate 90 CW to display", so the stored pixels are
+    # the upright image turned the other way.
+    upright.rotate(-90, expand=True).save(b)
+
     subprocess.run(
-        ["exiftool", "-overwrite_original", "-Orientation=1", "-n", str(a)],
+        ["exiftool", "-overwrite_original", "-Orientation=6", "-n", str(a)],
         check=True,
         capture_output=True,
     )
-    subprocess.run(
-        ["exiftool", "-overwrite_original", "-Orientation=1", "-n", str(b)],
-        check=True,
-        capture_output=True,
-    )
-    assert pixel_hashes(a).pixel_hash == pixel_hashes(b).pixel_hash
+
+    assert pixel_hashes(b).pixel_hash == pixel_hashes(a).pixel_hash

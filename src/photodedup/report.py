@@ -405,6 +405,85 @@ def cohort_pairs(conn: Connection) -> int:
     ).fetchone()["n"]
 
 
+def coverage(conn: Connection) -> list[tuple[str, int]]:
+    """The denominator. Every removable count below is a fraction of this.
+
+    Without it a report over a half-finished hash stage reads exactly like a
+    report over a finished one, because both only ever count what they found.
+    """
+    one = lambda sql: conn.execute(sql).fetchone()["n"]
+    surveyed = one("SELECT COUNT(*) AS n FROM asset WHERE survey_status = 'ok'")
+    hashed_ok = one(
+        """
+        SELECT COUNT(*) AS n FROM asset_hash h
+        JOIN asset a ON a.uuid = h.uuid AND a.survey_status = 'ok'
+        WHERE h.status = 'ok'
+        """
+    )
+    hash_errors = one(
+        """
+        SELECT COUNT(*) AS n FROM asset_hash h
+        JOIN asset a ON a.uuid = h.uuid AND a.survey_status = 'ok'
+        WHERE h.status = 'error'
+        """
+    )
+    no_original = one(
+        """
+        SELECT COUNT(*) AS n FROM asset_hash h
+        JOIN asset a ON a.uuid = h.uuid AND a.survey_status = 'ok'
+        WHERE h.status = 'no_original'
+        """
+    )
+    not_attempted = one(
+        """
+        SELECT COUNT(*) AS n FROM asset a
+        WHERE a.survey_status = 'ok'
+          AND NOT EXISTS (SELECT 1 FROM asset_hash h WHERE h.uuid = a.uuid)
+        """
+    )
+    ungrouped = one(
+        """
+        SELECT COUNT(*) AS n FROM asset_hash h
+        JOIN asset a ON a.uuid = h.uuid AND a.survey_status = 'ok'
+        WHERE h.status = 'ok'
+          AND NOT EXISTS (SELECT 1 FROM dup_member m WHERE m.uuid = h.uuid)
+        """
+    )
+    return [
+        ("assets surveyed ok", surveyed),
+        ("hashed ok", hashed_ok),
+        ("hash errors", hash_errors),
+        ("no local original", no_original),
+        ("not yet attempted", not_attempted),
+        ("hashed ok but in no group", ungrouped),
+    ]
+
+
+def groups_with_size_spread(conn: Connection, *, min_spread: int = 1_000_000) -> int:
+    """Exact groups whose members' file sizes differ by at least *min_spread*.
+
+    `jpeg_scan_hash` stops at EOI, so a Google motion photo and the same photo
+    with its appended MP4 trailer stripped hash identically. That is right for
+    grouping and wrong for arbitration: one member carries a video the other
+    lost. These are the groups where the size difference is the whole point.
+    """
+    return conn.execute(
+        """
+        SELECT COUNT(*) AS n FROM (
+            SELECT g.id
+            FROM dup_group g
+            JOIN dup_member m ON m.group_id = g.id
+            JOIN asset a ON a.uuid = m.uuid
+            WHERE g.tier = 'exact' AND a.file_size IS NOT NULL
+            GROUP BY g.id
+            HAVING COUNT(a.file_size) > 1
+               AND MAX(a.file_size) - MIN(a.file_size) >= :spread
+        )
+        """,
+        {"spread": min_spread},
+    ).fetchone()["n"]
+
+
 def sample_groups(conn: Connection, *, limit: int = 20) -> list[list[tuple]]:
     """A few exact groups rendered member by member, for checking by eye."""
     ids = [
@@ -441,12 +520,16 @@ def sample_groups(conn: Connection, *, limit: int = 20) -> list[list[tuple]]:
     return out
 
 
-def exact_components(conn: Connection) -> tuple[int, int, int]:
+def exact_components(conn: Connection, *, all_tiers: bool = False) -> tuple[int, int, int]:
     """Merge overlapping exact-tier groups into connected components.
 
     A pair found by two signals sits in two groups; summing per-signal
     counts would count it twice. Union-find over memberships gives the true
     (components, assets, removable) where removable = assets - components.
+
+    With *all_tiers* the perceptual `candidate` groups join the same union,
+    which answers "how many assets are implicated in total" rather than "how
+    many are safe to resolve". Nothing in the candidate tier is auto-resolvable.
     """
     parent: dict[str, str] = {}
 
@@ -465,8 +548,8 @@ def exact_components(conn: Connection) -> tuple[int, int, int]:
         """
         SELECT m.group_id AS gid, m.uuid AS uuid
         FROM dup_member m JOIN dup_group g ON g.id = m.group_id
-        WHERE g.tier = 'exact' ORDER BY m.group_id
-        """
+        {where} ORDER BY m.group_id
+        """.format(where="" if all_tiers else "WHERE g.tier = 'exact'")
     ).fetchall()
     by_group: dict[int, list[str]] = {}
     for r in rows:
@@ -486,17 +569,29 @@ def duplicate_report(conn: Connection) -> str:
     all_removable = sum(t[4] for t in totals)
     components, comp_assets, comp_removable = exact_components(conn)
 
+    _, _, all_components_removable = exact_components(conn, all_tiers=True)
+    sets = "set" if components == 1 else "sets"
+
     parts = [
         "# Duplicate Report\n",
         "Groups are formed per signal, so one set of assets can appear as both",
         "a `scan` group and a `pixel` group. Those are two views of one fact.",
         "Only `exact` tiers are ever safe to resolve automatically.\n",
+        "## Coverage\n",
+        "If 'not yet attempted' is non-zero, the numbers below are partial.\n",
+        _table(("measure", "assets"), coverage(conn)),
+        "\n## Removable\n",
         f"- Removable on exact signals, de-duplicated across signals: "
-        f"**{comp_removable}** ({comp_assets} assets in {components} sets)",
+        f"**{comp_removable}** ({comp_assets} assets in {components} {sets})",
         f"- Removable on exact signals, summed per signal (over-counts pairs "
         f"found by two signals): **{exact_removable}**",
-        f"- Removable including perceptual candidates: **{all_removable}**",
-        f"- Assets in more than one group: {multi_group_assets(conn)}\n",
+        f"- Removable including perceptual candidates, summed per signal "
+        f"(over-counts): **{all_removable}**",
+        f"- Removable including perceptual candidates, de-duplicated across "
+        f"signals: **{all_components_removable}**",
+        f"- Assets in more than one group: {multi_group_assets(conn)}",
+        f"- Exact groups whose members differ by \u22651 MB (motion-photo "
+        f"trailers, see spec): {groups_with_size_spread(conn)}\n",
         "## Groups by signal\n",
         _table(
             ("signal", "tier", "groups", "members", "removable"),
@@ -520,5 +615,11 @@ def duplicate_report(conn: Connection) -> str:
     for index, members in enumerate(sample_groups(conn), start=1):
         parts.append(f"\n**Group {index}**\n")
         parts.append(_table(("signal", "filename", "captured", "bytes", "size"), members))
+        sizes = [m[3] for m in members if m[3] is not None]
+        spread = max(sizes) - min(sizes) if sizes else 0
+        # A non-zero spread inside an EXACT group means the members are not the
+        # same file: a Google motion photo keeps its MP4 trailer past the EOI
+        # the scan hash stops at, and a stripped copy does not.
+        parts.append(f"\nsize spread: {spread} bytes\n")
 
     return "\n".join(parts)
