@@ -3,6 +3,18 @@
 from __future__ import annotations
 
 import hashlib
+from dataclasses import dataclass
+from pathlib import Path
+
+import imagehash
+from PIL import Image, ImageOps
+
+try:  # HEIC support; the library holds 6,678 of them.
+    import pillow_heif
+
+    pillow_heif.register_heif_opener()
+except Exception:  # pragma: no cover - absence is reported by the hash stage
+    pass
 
 # Metadata segments. APP0-APP15 carry JFIF, EXIF, ICC and XMP; COM is a comment.
 # Excluding them is what makes two files holding the same image with different
@@ -78,3 +90,38 @@ def jpeg_scan_hash(data: bytes) -> str | None:
             return digest.hexdigest()
 
     return None
+
+
+@dataclass(frozen=True)
+class PixelHashes:
+    pixel_hash: str
+    dhash: str
+    phash: str
+    width: int
+    height: int
+
+
+def pixel_hashes(path: Path) -> PixelHashes | None:
+    """Decode *path* once and derive every pixel-based signal from it.
+
+    Returns None when the file cannot be decoded, which the hash stage records
+    as an error rather than letting it abort a 65,974-asset run.
+    """
+    try:
+        with Image.open(path) as image:
+            # An orientation flag is metadata. Compare what is displayed.
+            image = ImageOps.exif_transpose(image)
+            rgb = image.convert("RGB")
+            width, height = rgb.size
+            digest = hashlib.sha256()
+            digest.update(f"{width}x{height}|".encode())
+            digest.update(rgb.tobytes())
+            return PixelHashes(
+                pixel_hash=digest.hexdigest(),
+                dhash=str(imagehash.dhash(rgb, hash_size=8)),
+                phash=str(imagehash.phash(rgb, hash_size=8)),
+                width=width,
+                height=height,
+            )
+    except Exception:
+        return None
