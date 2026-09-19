@@ -7,6 +7,7 @@ from pathlib import Path
 import click
 
 from photodedup.catalog import open_catalog
+from photodedup.grouping import run_group
 from photodedup.hash_stage import run_hash
 from photodedup.library import LibraryUnavailable, iter_assets
 from photodedup.report import survey_report
@@ -109,4 +110,18 @@ def hash(catalog: Path, workers: int | None, limit: int | None) -> None:
         f"{result.total} assets to hash "
         f"({result.hashed} hashed, {result.no_original} without originals, "
         f"{result.errors} errors); {result.already_done} already complete"
+    )
+
+
+@main.command()
+@click.option(
+    "--catalog", type=click.Path(path_type=Path), default=DEFAULT_CATALOG, show_default=True
+)
+def group(catalog: Path) -> None:
+    """Form duplicate groups from the content hashes. Decides nothing."""
+    conn = open_catalog(catalog)
+    result = run_group(conn)
+    click.echo(
+        f"{result.groups} groups covering {result.members} assets; "
+        f"{result.removable} removable if every group keeps one"
     )
