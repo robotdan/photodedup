@@ -7,6 +7,7 @@ from pathlib import Path
 import click
 
 from photodedup.catalog import open_catalog
+from photodedup.hash_stage import run_hash
 from photodedup.library import LibraryUnavailable, iter_assets
 from photodedup.report import survey_report
 from photodedup.survey import (
@@ -87,3 +88,25 @@ def report(catalog: Path, out: Path) -> None:
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(survey_report(conn))
     click.echo(f"wrote {out}")
+
+
+@main.command()
+@click.option(
+    "--catalog", type=click.Path(path_type=Path), default=DEFAULT_CATALOG, show_default=True
+)
+@click.option("--workers", type=int, default=None, help="Parallel workers. Defaults to CPU count minus one.")
+@click.option("--limit", type=int, default=None, help="Hash at most this many assets, for a trial run.")
+def hash(catalog: Path, workers: int | None, limit: int | None) -> None:
+    """Compute content hashes for every surveyed asset. Read-only, resumable."""
+    conn = open_catalog(catalog)
+    result = run_hash(
+        conn,
+        workers=workers,
+        limit=limit,
+        progress=lambda done, total: click.echo(f"  {done}/{total}", err=True),
+    )
+    click.echo(
+        f"{result.total} assets to hash "
+        f"({result.hashed} hashed, {result.no_original} without originals, "
+        f"{result.errors} errors); {result.already_done} already complete"
+    )
