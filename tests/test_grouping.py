@@ -183,3 +183,141 @@ def test_force_groups_a_partially_hashed_catalog(conn):
     result = run_group(conn, force=True)
     assert result.groups == 1
     assert get_stage(conn, "group")["status"] == "complete"
+
+
+from PIL import Image
+
+from photodedup.grouping import prefix_groups
+
+
+def write_noisy_jpeg(path, seed):
+    Image.effect_noise((96, 64), 64 + seed).convert("RGB").save(path, quality=95)
+    return path
+
+
+def add_file(conn, uuid, path, *, status, w=96, h=64, scan=None, pixel=None,
+             dhash=None, bytes_read=None, uti="public.jpeg", file_size=None):
+    size = file_size if file_size is not None else path.stat().st_size
+    conn.execute(
+        """INSERT INTO asset (uuid, kind, has_raw, uti, path, file_size, survey_status)
+           VALUES (?, 'image', 0, ?, ?, ?, 'ok')""",
+        (uuid, uti, str(path), size),
+    )
+    conn.execute(
+        """INSERT INTO asset_hash (uuid, status, scan_hash, pixel_hash, dhash,
+                                   pixel_width, pixel_height, bytes_read)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (uuid, status, scan, pixel, dhash, w, h, bytes_read),
+    )
+    conn.commit()
+
+
+def truncate(intact, out, *, cut=200, pad=0):
+    data = intact.read_bytes()
+    body = data[: data.rfind(b"\xff\xd9") - cut]
+    out.write_bytes(body + b"\x00" * pad)
+    return out, len(body)
+
+
+def test_truncated_prefix_of_intact_forms_a_prefix_group(conn, tmp_path):
+    intact = write_noisy_jpeg(tmp_path / "a.jpg", 1)
+    cut, length = truncate(intact, tmp_path / "a_cut.jpg", pad=300)
+    add_file(conn, "ok1", intact, status="ok", scan="s1", pixel="p1")
+    add_file(conn, "tr1", cut, status="truncated", bytes_read=length)
+    result = run_group(conn)
+    rows = groups(conn, "prefix")
+    assert len(rows) == 1
+    assert rows[0]["tier"] == "exact" and rows[0]["size"] == 2
+    assert rows[0]["digest"] == "s1"
+    members = {
+        r["uuid"] for r in conn.execute(
+            "SELECT uuid FROM dup_member WHERE group_id = ?", (rows[0]["id"],)
+        )
+    }
+    assert members == {"ok1", "tr1"}
+    assert result.groups == 1
+
+
+def test_prefix_digest_falls_back_to_pixel_hash(conn, tmp_path):
+    intact = write_noisy_jpeg(tmp_path / "a.jpg", 1)
+    cut, length = truncate(intact, tmp_path / "a_cut.jpg")
+    add_file(conn, "ok1", intact, status="ok", pixel="p1")
+    add_file(conn, "tr1", cut, status="truncated", bytes_read=length)
+    run_group(conn)
+    assert groups(conn, "prefix")[0]["digest"] == "p1"
+
+
+def test_diverging_bytes_with_same_dimensions_never_group(conn, tmp_path):
+    a = write_noisy_jpeg(tmp_path / "a.jpg", 1)
+    b = write_noisy_jpeg(tmp_path / "b.jpg", 2)
+    cut, length = truncate(a, tmp_path / "a_cut.jpg")
+    add_file(conn, "okb", b, status="ok", scan="s2", pixel="p2")
+    add_file(conn, "tr1", cut, status="truncated", bytes_read=length)
+    run_group(conn)
+    assert groups(conn, "prefix") == []
+
+
+def test_same_bytes_different_dimensions_are_never_compared(conn, tmp_path):
+    """A partner whose recorded dimensions differ is not a candidate, even if
+    its bytes would match. Dimensions come from the decode, and two files that
+    decode to different sizes are not the same image."""
+    intact = write_noisy_jpeg(tmp_path / "a.jpg", 1)
+    cut, length = truncate(intact, tmp_path / "a_cut.jpg")
+    add_file(conn, "ok1", intact, status="ok", scan="s1", pixel="p1", w=10, h=10)
+    add_file(conn, "tr1", cut, status="truncated", bytes_read=length)
+    run_group(conn)
+    assert groups(conn, "prefix") == []
+
+
+def test_partner_smaller_than_prefix_is_never_compared(conn, tmp_path):
+    intact = write_noisy_jpeg(tmp_path / "a.jpg", 1)
+    cut, length = truncate(intact, tmp_path / "a_cut.jpg")
+    # Lie about the partner's size so the SQL filter, not the byte compare,
+    # is what excludes it.
+    add_file(conn, "ok1", intact, status="ok", scan="s1", pixel="p1", file_size=length - 1)
+    add_file(conn, "tr1", cut, status="truncated", bytes_read=length)
+    run_group(conn)
+    assert groups(conn, "prefix") == []
+
+
+def test_two_intact_copies_join_one_prefix_group(conn, tmp_path):
+    intact = write_noisy_jpeg(tmp_path / "a.jpg", 1)
+    copy = tmp_path / "a_copy.jpg"
+    copy.write_bytes(intact.read_bytes())
+    cut, length = truncate(intact, tmp_path / "a_cut.jpg")
+    add_file(conn, "ok1", intact, status="ok", scan="s1", pixel="p1")
+    add_file(conn, "ok2", copy, status="ok", scan="s1", pixel="p1")
+    add_file(conn, "tr1", cut, status="truncated", bytes_read=length)
+    run_group(conn)
+    rows = groups(conn, "prefix")
+    assert len(rows) == 1 and rows[0]["size"] == 3
+
+
+def test_missing_truncated_file_is_skipped(conn, tmp_path):
+    intact = write_noisy_jpeg(tmp_path / "a.jpg", 1)
+    add_file(conn, "ok1", intact, status="ok", scan="s1", pixel="p1")
+    add_file(conn, "tr1", tmp_path / "gone.jpg", status="truncated",
+             bytes_read=100, file_size=100)
+    assert prefix_groups(conn) == []
+
+
+def test_truncated_joins_dhash_candidate_groups(conn):
+    add(conn, "u1", dhash="dddd")
+    add(conn, "u2", dhash="dddd", status="truncated")
+    run_group(conn)
+    rows = groups(conn, "dhash")
+    assert len(rows) == 1 and rows[0]["size"] == 2
+
+
+def test_truncated_never_joins_pixel_exact_groups(conn):
+    add(conn, "u1", pixel="ppp")
+    add(conn, "u2", pixel="ppp", status="truncated")
+    run_group(conn)
+    assert groups(conn, "pixel") == []
+
+
+def test_truncated_with_no_partner_forms_no_group(conn, tmp_path):
+    intact = write_noisy_jpeg(tmp_path / "a.jpg", 1)
+    cut, length = truncate(intact, tmp_path / "a_cut.jpg")
+    add_file(conn, "tr1", cut, status="truncated", bytes_read=length)
+    assert run_group(conn).groups == 0

@@ -420,6 +420,13 @@ def coverage(conn: Connection) -> list[tuple[str, int]]:
         WHERE h.status = 'ok'
         """
     )
+    truncated = one(
+        """
+        SELECT COUNT(*) AS n FROM asset_hash h
+        JOIN asset a ON a.uuid = h.uuid AND a.survey_status = 'ok'
+        WHERE h.status = 'truncated'
+        """
+    )
     hash_errors = one(
         """
         SELECT COUNT(*) AS n FROM asset_hash h
@@ -452,6 +459,7 @@ def coverage(conn: Connection) -> list[tuple[str, int]]:
     return [
         ("assets surveyed ok", surveyed),
         ("hashed ok", hashed_ok),
+        ("hashed leniently (truncated)", truncated),
         ("hash errors", hash_errors),
         ("no local original", no_original),
         ("not yet attempted", not_attempted),

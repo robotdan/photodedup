@@ -111,6 +111,7 @@ def test_coverage_counts_every_state_of_every_asset(conn):
     assert coverage(conn) == [
         ("assets surveyed ok", 6),
         ("hashed ok", 3),
+        ("hashed leniently (truncated)", 0),
         ("hash errors", 1),
         ("no local original", 1),
         ("not yet attempted", 1),
@@ -167,3 +168,11 @@ def test_report_pluralises_a_single_set(conn):
     text = duplicate_report(conn)
     assert "in 1 set)" in text
     assert "in 1 sets" not in text
+
+
+def test_coverage_counts_truncated_rows(conn):
+    add(conn, "u1", scan="aaa")
+    add(conn, "u2", status="truncated", dhash="d")
+    counts = dict(coverage(conn))
+    assert counts["hashed ok"] == 1
+    assert counts["hashed leniently (truncated)"] == 1
