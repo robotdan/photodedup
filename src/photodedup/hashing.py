@@ -65,10 +65,13 @@ def jpeg_scan_hash(data: bytes) -> str | None:
 
         if marker == _SOS:
             # Entropy-coded data runs from here to EOI. It contains 0xFF00
-            # stuffing and RST markers, so the only safe terminator is the
-            # final EOI; hash everything up to it.
-            end = data.rfind(b"\xff\xd9")
-            if end < i:
+            # stuffing and RST markers, never a bare FFD9, and any later
+            # segments before EOI are only tables and SOS headers, so the
+            # first FFD9 at or after this point is the real EOI. Searching
+            # forward also means bytes a second import appended after the
+            # true EOI are never absorbed into the digest.
+            end = data.find(b"\xff\xd9", i)
+            if end < 0:
                 return None
             digest.update(data[i:end])
             digest.update(b"\xff\xd9")

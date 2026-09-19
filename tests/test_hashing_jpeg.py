@@ -89,3 +89,35 @@ def test_non_jpeg_returns_none(data):
 def test_truncated_jpeg_returns_none(tmp_path):
     a = make_jpeg(tmp_path / "a.jpg")
     assert jpeg_scan_hash(a.read_bytes()[:40]) is None
+
+
+def test_trailing_bytes_after_eoi_are_ignored(tmp_path):
+    """A second import may append bytes after EOI; they must not affect the hash."""
+    a = make_jpeg(tmp_path / "a.jpg")
+    base = a.read_bytes()
+    assert jpeg_scan_hash(base) == jpeg_scan_hash(base + b"junk\xff\xd9more")
+
+
+def test_double_eoi_matches_single(tmp_path):
+    a = make_jpeg(tmp_path / "a.jpg")
+    base = a.read_bytes()
+    assert jpeg_scan_hash(base) == jpeg_scan_hash(base + b"\xff\xd9")
+
+
+def test_progressive_copies_with_different_exif_match(tmp_path):
+    a = tmp_path / "a.jpg"
+    b = tmp_path / "b.jpg"
+    baseline = tmp_path / "baseline.jpg"
+    Image.new("RGB", (64, 48), "red").save(a, quality=90, progressive=True)
+    shutil.copy2(a, b)
+    set_tags(b, "-DateTimeOriginal=2020:12:18 09:12:48")
+    assert jpeg_scan_hash(a.read_bytes()) == jpeg_scan_hash(b.read_bytes())
+
+    Image.new("RGB", (64, 48), "red").save(baseline, quality=90, progressive=False)
+    assert jpeg_scan_hash(a.read_bytes()) != jpeg_scan_hash(baseline.read_bytes())
+
+
+def test_transposed_dimensions_differ(tmp_path):
+    a = make_jpeg(tmp_path / "a.jpg", size=(64, 48))
+    b = make_jpeg(tmp_path / "b.jpg", size=(48, 64))
+    assert jpeg_scan_hash(a.read_bytes()) != jpeg_scan_hash(b.read_bytes())
