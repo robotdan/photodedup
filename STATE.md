@@ -92,9 +92,12 @@ overwhelming majority of duplicates are byte-identical files imported
 twice, and the EXIF-rewritten pairs are a thin layer on top. Phase 3 should
 not assume otherwise.
 
-Still to do before Phase 3 starts: the user runs the parallel-path check
-described above (`--workers 4 --limit 2000` on a catalog copy) and the
-16 error files get a look.
+Parallel path VERIFIED 2026-09-19: the user ran `hash --workers 4 --limit
+2000` on a catalog copy in a real terminal; all 2,000 rows matched the
+single-threaded run exactly on every column (status and all hash values,
+0 differing). The process-pool branch is safe to use for full runs.
+
+Still to do before Phase 3 starts: the 16 hash-error files get a look.
 
 
 
