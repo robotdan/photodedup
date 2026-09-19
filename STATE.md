@@ -97,14 +97,60 @@ Parallel path VERIFIED 2026-09-19: the user ran `hash --workers 4 --limit
 single-threaded run exactly on every column (status and all hash values,
 0 differing). The process-pool branch is safe to use for full runs.
 
-Still to do before Phase 3 starts: the 16 hash-error files get a look.
+The 16 hash-error files were inspected on 2026-09-19; see "Hash-error
+inspection" below. Nothing is outstanding before Phase 3 design.
 
 
 
-_Empty on purpose._ Fill this in with the output of `photodedup group` and
-`photodedup duplicates` once the hash stage completes: total groups, members,
-removable de-duplicated across signals, the coverage table, and how the
-number compares with the 16,801 floor described under "The number to watch".
+## Hash-error inspection (2026-09-19)
+
+All 16 `error` rows were opened by hand. Every one is a damaged file, and
+the damage has one shape: the 15 JPEGs are truncated (no EOI marker, so
+`jpeg_scan_hash` returns None and Pillow refuses to decode) and the "PNG"
+is a JSON document with a base64 PNG inside a `normalImage` key. With
+`ImageFile.LOAD_TRUNCATED_IMAGES = True` all 15 JPEGs decode; the missing
+tail renders as flat grey.
+
+Nine of the 16 are duplicates with an intact keeper already in the library:
+
+- `Picture 046(9)`, `047(8)`, `049(5)` (FUJI, 2003): each is a strict byte
+  prefix of `Picture 046/047/049.jpg` with the remainder zero-filled to the
+  identical file size. 42%, 8% and 76% of the real bytes survive. The
+  intact twin has an `ok` hash.
+- `IMAG0136`, `IMAG0137` (2010): each is a byte prefix of an intact
+  same-named twin, missing the last ~90 KB / ~65 KB. Both have three
+  same-named twins; two of the three are intact copies.
+- `IMG_20130727_191523` (2013): twin is a different encode (1.9 MB vs
+  2.8 MB), dhash distance 1, phash distance 2; the truncated one loses the
+  bottom ~15%. Twin is complete.
+- `00001IMG_00001_BURST..._COVER` (2017): complete 3.65 MB twin with the
+  same name; dhash and phash distance 0.
+- `IMG_1742.PNG` (2024): the embedded PNG is pixel-identical to
+  `IMG_1744.PNG` (912x588). Some app exported the image wrapped in JSON.
+
+Seven are unique and simply damaged:
+
+- The six non-cover frames of the 2017-05-01 burst: complete images that
+  lack only the EOI and a few trailing bytes. Visually perfect. Keep.
+- `IMG_20161106_174655`: 93% of bytes present, bottom slice grey. Keep.
+- `IMG_20161104_125605`: 65 KB of real data, then 4.1 MB of zeros. Only the
+  top strip survives. Unrecoverable; user decides whether it stays.
+
+Consequence for Phase 3, which is a real design input and not a tweak:
+hash-error assets are currently INVISIBLE to grouping (no scan hash, no
+dhash), so nine known duplicates never appear in any group. The hash stage
+should record a `truncated` status, decode leniently for the perceptual
+signals, and Phase 3 arbitration needs a hard rule that a truncated file
+never wins keeper over a complete one, plus a prefix rule (real bytes of A
+are a byte prefix of B, and B hashes ok) that promotes such a pair to the
+exact tier. The contact sheet used for this inspection was throwaway; the
+byte-prefix and hash-distance checks above are reproducible from the
+catalog in a few lines of Python.
+
+Note: the `stage` table's `hash` note reads "63604 hashed, 1854 without
+originals" because it counts only the final resumed run; the `asset_hash`
+table itself holds 64,083 ok / 1,875 no_original / 16 error, which are the
+numbers to trust.
 
 ## Modules
 
