@@ -258,3 +258,13 @@ def test_missing_tolerance_still_aborts_above_the_raised_bar(conn):
             conn, records, library_path=LIBRARY, read_exif=no_exif, missing_tolerance=0.5
         )
     assert "--missing-tolerance" in str(excinfo.value)
+
+
+def test_thumb_path_is_stored(conn):
+    rec = AssetRecord(
+        uuid="u1", kind="image", filename="a.jpg", original_filename="a.jpg",
+        path="/tmp/a.jpg", date_added=datetime(2020, 1, 1), thumb_path="/lib/t.jpg",
+    )
+    run_survey(conn, [rec], library_path=LIBRARY, read_exif=no_exif)
+    row = conn.execute("SELECT thumb_path FROM asset WHERE uuid='u1'").fetchone()
+    assert row["thumb_path"] == "/lib/t.jpg"

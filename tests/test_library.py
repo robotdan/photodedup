@@ -60,3 +60,60 @@ def test_asset_record_accepts_full_payload():
     )
     assert record.original_filename == "slickrock mike and dan(1).jpg"
     assert record.keywords == ("utah", "moab")
+
+
+def test_asset_record_thumb_path_defaults_to_none():
+    assert AssetRecord(uuid="u1", kind="image").thumb_path is None
+
+
+def test_iter_records_takes_the_smallest_derivative():
+    from photodedup.library import _iter_records
+
+    class Photo:
+        uuid = "u1"
+        ismovie = False
+        filename = original_filename = "a.jpg"
+        uti = "public.jpeg"
+        width = height = 10
+        path = "/tmp/a.jpg"
+        date_added = date = None
+        live_photo = has_raw = hasadjustments = favorite = hidden = intrash = False
+        title = description = None
+        location = None
+        keywords = albums = ()
+        path_derivatives = ["/lib/big.jpeg", "/lib/small.jpeg"]
+
+    class DB:
+        def photos(self, **kwargs):
+            return [Photo()]
+
+    [record] = list(_iter_records(DB()))
+    assert record.thumb_path == "/lib/small.jpeg"
+
+
+def test_iter_records_tolerates_derivative_lookup_failure():
+    from photodedup.library import _iter_records
+
+    class Photo:
+        uuid = "u1"
+        ismovie = False
+        filename = original_filename = "a.jpg"
+        uti = "public.jpeg"
+        width = height = 10
+        path = "/tmp/a.jpg"
+        date_added = date = None
+        live_photo = has_raw = hasadjustments = favorite = hidden = intrash = False
+        title = description = None
+        location = None
+        keywords = albums = ()
+
+        @property
+        def path_derivatives(self):
+            raise RuntimeError("no derivatives directory")
+
+    class DB:
+        def photos(self, **kwargs):
+            return [Photo()]
+
+    [record] = list(_iter_records(DB()))
+    assert record.thumb_path is None

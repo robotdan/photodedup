@@ -85,17 +85,17 @@ def _write_asset(
         """
         INSERT INTO asset (
             uuid, filename, original_filename, uti, kind, width, height,
-            file_size, path, date_added, photos_date, photos_tz_offset,
+            file_size, path, thumb_path, date_added, photos_date, photos_tz_offset,
             file_mtime, is_live, has_raw, has_adjustments, is_favorite,
             is_hidden, in_trash, title, description, latitude, longitude,
             keywords, albums, import_uuid, survey_status, survey_error,
             exif_error
         ) VALUES (
             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-            ?, ?, ?, 'ok', NULL, ?
+            ?, ?, ?, ?, 'ok', NULL, ?
         )
         ON CONFLICT (uuid) DO UPDATE SET
-            survey_status = 'ok', survey_error = NULL, exif_error = excluded.exif_error
+            survey_status = 'ok', survey_error = NULL, exif_error = excluded.exif_error, thumb_path = excluded.thumb_path
         """,
         (
             record.uuid,
@@ -107,6 +107,7 @@ def _write_asset(
             record.height,
             tags.get("File:FileSize"),
             record.path,
+            record.thumb_path,
             _iso(record.date_added),
             _iso(record.photos_date),
             record.photos_tz_offset,

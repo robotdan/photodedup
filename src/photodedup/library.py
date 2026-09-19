@@ -43,6 +43,7 @@ class AssetRecord:
     keywords: tuple[str, ...] = field(default=())
     albums: tuple[str, ...] = field(default=())
     import_uuid: str | None = None
+    thumb_path: str | None = None
 
 
 def _install_photoscript_stub() -> None:
@@ -90,6 +91,21 @@ def _tz_offset(value: datetime | None) -> int | None:
     if value is None or value.utcoffset() is None:
         return None
     return int(value.utcoffset().total_seconds())
+
+
+def _thumb_path(photo: object) -> str | None:
+    """The smallest derivative Photos keeps for *photo*, or None.
+
+    osxphotos orders `path_derivatives` largest first. The lookup walks the
+    library's derivatives directory and can fail for shared or syndicated
+    assets; a missing thumbnail only costs the review report a placeholder,
+    so failure here must never fail the survey.
+    """
+    try:
+        derivatives = getattr(photo, "path_derivatives", None) or []
+    except Exception:
+        return None
+    return str(derivatives[-1]) if derivatives else None
 
 
 def iter_assets(library_path: Path) -> Iterator[AssetRecord]:
@@ -145,4 +161,5 @@ def _iter_records(db: object) -> Iterator[AssetRecord]:
             keywords=tuple(photo.keywords or ()),
             albums=tuple(photo.albums or ()),
             import_uuid=getattr(photo, "import_uuid", None),
+            thumb_path=_thumb_path(photo),
         )
