@@ -1,37 +1,35 @@
 # Photo De-duplication — Working State
 
-**Last updated:** 2026-09-19
-**Current phase:** Phase 3 (arbitrate, review report) — built, run once, and
-amended after the user's sampling. Schema is now v4; the catalog must be
-rebuilt before the amended rules are run.
+**Last updated:** 2026-09-20
+**Current phase:** Phase 4 (archive, apply, verify) — BUILD COMPLETE at HEAD;
+self-test and archive not yet run.
 **Branch:** `main`
 **Spec:** docs/superpowers/specs/2026-09-18-photo-dedup-design.md (binding authority)
 **Phase 2 plan:** docs/superpowers/plans/2026-09-19-photo-dedup-phase2-hash-group.md
 **Phase 3 plan:** docs/superpowers/plans/2026-09-19-photo-dedup-phase3-arbitrate-report.md
+**Phase 4 plan:** docs/superpowers/plans/2026-09-20-photo-dedup-phase4-archive-apply-verify.md
+**Phase 4 spec:** docs/superpowers/specs/2026-09-20-photo-dedup-phase4-archive-apply-verify-design.md
 
 ## The one outstanding action
 
-Rebuild the catalog at schema v4 and run the pipeline through `review`, in
-your own terminal (the agent shell cannot start the process pool):
+Phase 4 is built but has not touched the real library. Everything from here
+runs in your own terminal, from the repo root (the agent shell cannot start
+Photos, script it, or start the process pool):
 
-    cd /Users/robotdan/dev/tools
-    rm -f catalog.sqlite catalog.sqlite-shm catalog.sqlite-wal
-    uv run photodedup survey --missing-tolerance 0.05     # ~5 min
-    uv run photodedup hash --workers 4                    # <15 min
-    uv run photodedup group
-    uv run photodedup duplicates
-    uv run photodedup arbitrate
-    uv run photodedup review
-    open reports/review/index.html
+    uv run photodedup apply --self-test <UUID of any one photo>   # proves the write path; restores the photo
+    uv run photodedup archive --limit 20                          # trial: 20 losers to the drive
+    uv run photodedup archive                                     # the rest; re-run until 0 mismatched, 0 missing
+    uv run photodedup apply                                       # prints the plan, writes nothing
+    uv run photodedup apply --dry-run --all --include-disagreeing-dates
+    uv run photodedup apply --merge
+    uv run photodedup apply --dates --include-disagreeing-dates
+    uv run photodedup apply --stage
+    uv run photodedup verify                                      # before deleting: all losers present, 0 keepers missing
 
-Then record the numbers under "Phase 3 results" and compare them with the
-"Expected results on this library" section of the Phase 3 spec. If they
-disagree by more than the prefix rule explains, stop and find out why
-before sampling.
-
-`group` will read on the order of a gigabyte during the prefix rule because
-seven damaged burst frames share their 4048x3036 dimensions with about
-1,200 other assets; that is expected, not a hang.
+Then, in Photos: open the folder "Dedup Delete", delete the contents of each
+album, and "Dedup Delete blank" after checking it; run `verify` again; empty
+Recently Deleted only after a clean verify, and only once you are done
+relying on the archive as a fallback.
 
 ## Paths
 
@@ -245,7 +243,10 @@ numbers to trust.
   and the duplicate report.
 - `src/photodedup/exif.py` — batched exiftool wrapper.
 - `src/photodedup/library.py` — read-only osxphotos adapter. Installs a
-  photoscript stub so it works in an agent shell.
+  photoscript stub so it works in an agent shell; the real module is tried
+  first, so a process with a GUI session keeps it. Now also reads per-uuid
+  state (`AssetState`, `read_states`) and original/edited/live-photo paths
+  (`AssetPaths`, `iter_paths`) for the archive and verify stages.
 - `src/photodedup/survey.py` — survey orchestration. Resumable, idempotent.
 - `src/photodedup/hashing.py` — pure hashing: `jpeg_scan_hash`,
   `pixel_hashes`, `video_stream_hash`. FINISHED.
@@ -258,8 +259,25 @@ numbers to trust.
 - `src/photodedup/review.py` — writes the static HTML review report
   (`write_review`). No JavaScript, no network.
 - `src/photodedup/report.py` — Markdown survey and duplicate reports.
+- `src/photodedup/photos_write.py` — the one place that writes to Photos.
+  `PhotosWriter` is a `Protocol` (`PhotoscriptWriter` the real
+  implementation, `FakePhotos` in tests the stand-in), so every apply step
+  is tested without photoscript or a GUI session.
+- `src/photodedup/archive.py` — copies every loser's original (plus edited
+  renders and Live Photo movies) to the external drive and verifies the
+  copy by re-reading it (`run_archive`). Resumable; refuses on low free
+  space or an unmounted volume; writes a manifest and per-file sidecar.
+- `src/photodedup/apply.py` — applies decisions to Photos: merges loser
+  metadata onto keepers, corrects keeper dates, and stages losers into
+  `Dedup Delete NNN` albums (`run_merge`, `run_dates`, `run_stage`).
+  `require_archive` gates every write on the archive stage; `self_test`
+  proves the write path on one photo and restores it; nothing here deletes.
+- `src/photodedup/verify.py` — re-reads the library after `apply` and
+  reports whether losers are still present or gone, keepers are still
+  there, dates and merges took, and whether any staged loser stopped being
+  a loser (`run_verify`, `verify_report`). Read-only.
 - `src/photodedup/cli.py` — `survey`, `report`, `hash`, `group`,
-  `duplicates`, `sets`, `arbitrate`, `review`.
+  `duplicates`, `sets`, `arbitrate`, `review`, `archive`, `apply`, `verify`.
 
 ## Running the survey again
 
@@ -403,6 +421,49 @@ What the reviews established, which the commit messages do not record:
   found 9,679 partner candidates for the 15 truncated files; a 64 KB head
   comparison now precedes any full-prefix read.
 
+## Phase 4 progress
+
+Plan: `docs/superpowers/plans/2026-09-20-photo-dedup-phase4-archive-apply-verify.md`
+Spec: `docs/superpowers/specs/2026-09-20-photo-dedup-phase4-archive-apply-verify-design.md`
+Ledger (gitignored, on disk):
+`.superpowers/sdd/2026-09-20-photo-dedup-phase4-archive-apply-verify/`
+
+- [x] Task 1 — `archive_file`/`apply_action` tables, the `PhotosWriter`
+  adapter and its fake, `AssetState`/`read_states`, `AssetPaths`/`iter_paths`
+  — `e626f65`, fix `10813ee`
+- [x] Task 2 — `archive.py`: copy losers to the external drive with
+  verification and sidecars — `c536274`, fixes `1ba5ab2`, `3a27f0d`
+- [x] Task 3 — `apply.py` merge and date correction — `bc2c598`, fix `11c7af3`
+- [x] Task 4 — `apply.py` staging, `losers.csv`, self-test, and the `apply`
+  CLI — `6359410`, fix `6f78539`
+- [x] Task 5 — `verify.py` and the `verify` CLI; this handoff — this commit
+
+`uv run pytest -q` passes (393 tests). Not yet run against the real
+library; see "The one outstanding action" above.
+
+What the reviews established, which the commit messages do not record:
+
+- photoscript's `Album.photos` is a method, not a property — calling it bare
+  silently iterates nothing instead of raising. A stand-in-module test now
+  pins every API shape `photos_write.py` relies on, so a future photoscript
+  release that changes a signature fails loudly in CI instead of quietly in
+  Photos.
+- The archive stage gate in `apply.require_archive` is what actually
+  protects edited renders and Live Photo movies. `archive_file` coverage is
+  checked for originals only, because edited renders and Live Photo movies
+  are copied but never separately gated; the gate on originals is what
+  stands between staging and a loser whose extra files were never copied.
+- A `--limit` trial run of `archive` never marks the archive stage
+  `complete`, on purpose, so a partial trial can never be mistaken for a
+  finished archive by a later stage's `require_stage_complete` check.
+- `--dry-run` never constructs the Photos writer at all (`cli.py` passes a
+  `_NullWriter` whose every method asserts if called) and writes no
+  `losers.csv`, so a dry run cannot touch Photos or leave a manifest behind
+  even if a code path forgot to check the flag.
+- Keeper dates are set and verified through `photoscript.Photo.date`, read
+  back after the write; `osxphotos timewarp` (Spike 2) is not used anywhere
+  in the apply path.
+
 ## Phase 4 obligations
 
 `apply` must key date correction on `decision.date_changes`, never on
@@ -419,12 +480,17 @@ contains `dates_disagree`, regardless of `resolvable`. `dates_disagree` is
 informational and does not block resolvability, but it means the earliest
 survivor won by rule alone and nobody has looked at it; writing that date
 back to Photos without a human glance defeats the point of the review step.
+Implemented: `date_targets` excludes those sets unless `apply` is run with
+`--include-disagreeing-dates`, which the user passes only after sampling
+them.
 
 `apply` must skip a resolvable decision that has no `decision_loser` rows.
 A set can shrink to one member between `arbitrate` and `apply` when an
 asset is deleted and the deletion cascades, leaving a decision with a
 keeper and nothing to lose. There is nothing to resolve in that case, and
-`apply` must not treat it as an error either.
+`apply` must not treat it as an error either. Implemented: `run_stage`
+populates the delete albums straight from `decision_loser`, so a keeper
+with no loser rows is never a candidate for staging in the first place.
 
 Stage dependencies are checked by status only, so re-running `hash` after
 `group` has already run leaves `group` reporting complete over groups that

@@ -31,6 +31,7 @@ from photodedup.survey import (
     MissingOriginalsError,
     run_survey,
 )
+from photodedup.verify import run_verify, verify_report
 
 DEFAULT_LIBRARY = Path.home() / "Pictures" / "Photos Library.photoslibrary"
 DEFAULT_CATALOG = Path("catalog.sqlite")
@@ -355,3 +356,22 @@ def apply(catalog: Path, do_merge: bool, do_dates: bool, do_stage: bool, do_all:
         raise click.ClickException(str(exc)) from exc
     except PhotosUnavailable as exc:
         raise click.ClickException(str(exc)) from exc
+
+
+@main.command()
+@click.option("--catalog", type=click.Path(path_type=Path), default=DEFAULT_CATALOG, show_default=True)
+@click.option("--out", type=click.Path(path_type=Path), default=Path("reports/verify.md"), show_default=True)
+def verify(catalog: Path, out: Path) -> None:
+    """Re-read the library and report deletion progress, keeper safety, and dates. Read-only."""
+    conn = open_catalog(catalog)
+    try:
+        result = run_verify(conn)
+    except LibraryUnavailable as exc:
+        raise click.ClickException(str(exc)) from exc
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(verify_report(result))
+    click.echo(
+        f"wrote {out}: {len(result.losers_present)} losers still present, {len(result.losers_gone)} gone, "
+        f"{len(result.keepers_missing)} keepers missing, {len(result.dates_wrong)} dates wrong, "
+        f"{len(result.stale_staged)} staged photos no longer losers"
+    )

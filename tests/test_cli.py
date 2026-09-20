@@ -119,3 +119,7 @@ def test_apply_self_test_refuses_dry_run(catalog):
     result = run("apply", "--catalog", str(catalog), "--self-test", "abc", "--dry-run")
     assert result.exit_code != 0
     assert "--dry-run" in result.output
+
+
+def test_verify_command_exists():
+    assert "verify" in run("--help").output
