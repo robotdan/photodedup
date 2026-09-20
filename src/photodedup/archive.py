@@ -268,10 +268,20 @@ def run_archive(
 
     conn.commit()
     _write_manifest(conn, root)
-    set_stage(
-        conn,
-        "archive",
-        "complete" if not mismatched and not missing else "running",
-        notes=f"{copied} copied, {skipped} already done, {mismatched} mismatched, {missing} missing, {total_bytes} bytes",
-    )
+
+    # Completion is judged against every pending loser, not just this run's
+    # (possibly `--limit`-truncated) batch: a clean but partial batch must not
+    # report done while losers past the limit still have nothing archived.
+    remaining_done = {
+        (r["uuid"], r["kind"]) for r in conn.execute("SELECT uuid, kind FROM archive_file")
+    }
+    remaining = [
+        r for r in losers
+        if any((r["uuid"], kind) not in remaining_done for kind, _source in sources_for(r))
+    ]
+    notes = f"{copied} copied, {skipped} already done, {mismatched} mismatched, {missing} missing, {total_bytes} bytes"
+    if remaining:
+        notes += f", {len(remaining)} losers remaining"
+    status = "complete" if not mismatched and not missing and not remaining else "running"
+    set_stage(conn, "archive", status, notes=notes)
     return ArchiveResult(copied, skipped, mismatched, missing, total_bytes)

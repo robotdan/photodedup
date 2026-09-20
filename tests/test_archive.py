@@ -199,3 +199,24 @@ def test_refuses_when_the_volume_is_not_mounted(decided, tmp_path, monkeypatch):
 
     with pytest.raises(ArchiveSpace):
         run_archive(decided, fake_volume / "x", free_bytes=lambda p: 10**9)
+
+
+def test_limited_run_leaves_the_stage_running(conn, tmp_path):
+    add_asset(conn, "a", tmp_path, size=20)
+    add_asset(conn, "b", tmp_path, size=10)
+    add_set(conn, 1, ["a", "b"])
+    add_asset(conn, "e", tmp_path, size=20)
+    add_asset(conn, "f", tmp_path, size=10)
+    add_set(conn, 2, ["e", "f"])
+    run_arbitrate(conn, now=NOW)
+
+    root = tmp_path / "archive"
+    first = run_archive(conn, root, limit=1, free_bytes=lambda p: 10**9)
+    assert first.copied == 1
+    stage = get_stage(conn, "archive")
+    assert stage["status"] == "running"
+    assert "remaining" in stage["notes"] and "1" in stage["notes"]
+
+    second = run_archive(conn, root, free_bytes=lambda p: 10**9)
+    assert second.copied == 1
+    assert get_stage(conn, "archive")["status"] == "complete"
