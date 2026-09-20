@@ -141,10 +141,34 @@ single-threaded run exactly on every column (status and all hash values,
 The 16 hash-error files were inspected on 2026-09-19; see "Hash-error
 inspection" below. Nothing is outstanding before Phase 3 design.
 
-## Phase 3 results
+## Phase 3 results (real run, 2026-09-19)
 
-_Empty on purpose. Fill in from the real run: arbitrate totals, review
-report location, and how the sampled decisions looked._
+Catalog rebuilt at schema v3 in the user's terminal with `--workers 4`.
+Hash: 64,081 ok, 17 truncated, 1,875 no original, 1 error (the JSON
+"PNG"). The 17 truncated are the 15 inspected earlier plus
+`IMG_20161104_125602` and `_125607`, both cut at exactly 65,363 bytes like
+`_125605` and previously passed as ok because Pillow decoded their zero
+padding; they are unique damaged files, not duplicates.
+
+Group: 52,327 groups; 16,849 exact sets, 3,170 candidate sets. Prefix
+rule formed exactly 3 groups, the three FUJI pairs. IMAG0136/0137 differ
+from their twins in the final byte and the burst cover and 2013 photo are
+different encodes, so those four known duplicates are not byte prefixes
+and stay outside the exact tier; handle them by hand in Phase 4.
+
+Arbitrate: 20,019 sets, 16,836 resolvable, 3,183 need review, 108 dates
+rescued. Keeper reasons: albums 16,943, file_size 2,763, date_added 96,
+adjustments 87, caption 71, favorite 52, intact 4, uuid 3. Sets flagged
+dates_disagree: 853 (704 exact). The 108 is smaller than the 570 the
+Phase 2 report predicted because that figure counted per-signal groups
+whose members disagreed, while date_changes counts only sets whose KEEPER
+carries the wrong date; in most disagreeing sets the album-bearing
+original wins and already has the right date.
+
+Review: 20,019 sets on 77 pages, 34,314 thumbnails, 0 placeholders, at
+`reports/review/index.html`. keeper_smaller: 0, as required. Sampling by
+the user is the next step; nothing in Phase 4 starts until the sampled
+decisions look right.
 
 ## Hash-error inspection (2026-09-19)
 
