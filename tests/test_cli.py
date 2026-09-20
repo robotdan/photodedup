@@ -49,6 +49,12 @@ def test_review_force_writes_an_index(catalog, tmp_path):
     assert "wrote" in result.output
 
 
+def test_sets_refuses_before_group(catalog):
+    result = run("sets", "--catalog", str(catalog))
+    assert result.exit_code != 0
+    assert "group stage" in result.output and "--force" in result.output
+
+
 def test_sets_runs_on_grouped_catalog(catalog):
     conn = open_catalog(catalog)
     set_stage(conn, "group", "complete")
