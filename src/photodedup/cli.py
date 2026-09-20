@@ -11,6 +11,7 @@ from photodedup.arbitrate import run_arbitrate
 from photodedup.archive import ArchiveSpace, run_archive
 from photodedup.catalog import (
     StageIncomplete,
+    get_stage,
     open_catalog,
     require_stage_complete,
     set_stage,
@@ -268,3 +269,8 @@ def archive(catalog: Path, root: Path, limit: int | None) -> None:
         f"{result.copied} copied ({result.bytes} bytes), {result.skipped} already archived, "
         f"{result.mismatched} mismatched (will retry), {result.missing} missing sources"
     )
+    stage = get_stage(conn, "archive")
+    status = stage["status"] if stage is not None else "unknown"
+    click.echo(f"archive stage: {status}")
+    if status != "complete":
+        click.echo("re-run `photodedup archive` once every file copies and verifies clean")

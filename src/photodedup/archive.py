@@ -50,6 +50,18 @@ def pending_losers(conn: Connection) -> list[Row]:
     ).fetchall()
 
 
+def _sanitize_name(name: str) -> str:
+    """Neutralise a name that came from Photos metadata, not this filesystem.
+
+    `original_filename` is free text an import (or a synced device) supplied;
+    treating it as a path component without cleaning it up would let a stray
+    "/" nest it into a directory we did not create, or a leading "." hide it.
+    """
+    name = name.replace("/", "_")
+    name = name.lstrip(".")
+    return name or "_"
+
+
 def dest_for(row: Mapping, kind: str, source: str) -> str:
     """Relative destination path: <YYYY>/<MM>/<uuid>_<name>."""
     date = row["photos_date"]
@@ -57,7 +69,8 @@ def dest_for(row: Mapping, kind: str, source: str) -> str:
     uuid = row["uuid"]
     suffix = PurePath(source).suffix.lower()
     if kind == "original":
-        name = row["original_filename"] or f"{uuid}{suffix}"
+        raw_name = row["original_filename"]
+        name = _sanitize_name(raw_name) if raw_name else f"{uuid}{suffix}"
         return f"{folder}/{uuid}_{name}"
     return f"{folder}/{uuid}_{kind}{suffix}"
 
@@ -86,6 +99,23 @@ def _default_free_bytes(root: Path) -> int:
     while not probe.exists():
         probe = probe.parent
     return shutil.disk_usage(probe).free
+
+
+def _check_volume(root: Path) -> None:
+    """Refuse a root under an unmounted /Volumes entry.
+
+    Walking up to an existing ancestor (as `_default_free_bytes` does) is
+    exactly wrong for an external drive: when it is unplugged, `/Volumes/<name>`
+    does not exist, the walk-up lands on the boot disk, and the "free space"
+    check happily reports gigabytes free on the wrong disk. A root elsewhere
+    is unaffected and keeps the walk-up behaviour.
+    """
+    parts = Path(root).parts
+    if len(parts) < 3 or parts[1] != "Volumes":
+        return
+    volume = Path(parts[0], parts[1], parts[2])
+    if not volume.exists() or not os.path.ismount(str(volume)):
+        raise ArchiveSpace(f"{volume} is not a mounted volume; is the drive plugged in?")
 
 
 def _sidecar(row: Row, sha: str, size: int, stamp: str) -> dict:
@@ -146,13 +176,43 @@ def run_archive(
         )
 
     root = Path(root)
+    _check_volume(root)
+
     losers = pending_losers(conn)
     done = {
         (r["uuid"], r["kind"]) for r in conn.execute("SELECT uuid, kind FROM archive_file")
     }
-    todo = [r for r in losers if (r["uuid"], "original") not in done]
-    if limit is not None:
-        todo = todo[:limit]
+
+    # Build the path map for every pending loser, not just the ones still
+    # missing an original: a loser whose original is already archived but
+    # whose edited render is not must still be looked up here, or its edited
+    # kind can never be found and the run reports clean when it is not.
+    if paths is None and losers:
+        run_row = get_run(conn)
+        if run_row is not None:
+            wanted = {r["uuid"] for r in losers}
+            paths = {
+                p.uuid: p for p in iter_paths(Path(run_row["library_path"])) if p.uuid in wanted
+            }
+    paths = paths or {}
+
+    def sources_for(row: Row) -> list[tuple[str, str | None]]:
+        extra = paths.get(row["uuid"])
+        if extra is None:
+            return [("original", row["path"])]
+        srcs: list[tuple[str, str | None]] = [("original", extra.path or row["path"])]
+        if extra.path_edited:
+            srcs.append(("edited", extra.path_edited))
+        if extra.path_live:
+            srcs.append(("live", extra.path_live))
+        return srcs
+
+    needs_work = [
+        r for r in losers
+        if any((r["uuid"], kind) not in done for kind, _source in sources_for(r))
+    ]
+    skipped = len(losers) - len(needs_work)
+    todo = needs_work[:limit] if limit is not None else needs_work
 
     raw_bytes = sum((r["file_size"] or 0) for r in todo)
     need = int(raw_bytes * (1 + HEADROOM))
@@ -163,30 +223,12 @@ def run_archive(
             f"{free} bytes free at {root}."
         )
 
-    if paths is None and todo:
-        run_row = get_run(conn)
-        if run_row is not None:
-            wanted = {r["uuid"] for r in todo}
-            paths = {
-                p.uuid: p for p in iter_paths(Path(run_row["library_path"])) if p.uuid in wanted
-            }
-    paths = paths or {}
-
     set_stage(conn, "archive", "running")
     root.mkdir(parents=True, exist_ok=True)
     copied = mismatched = missing = total_bytes = 0
-    skipped = len(losers) - len(todo)
 
     for index, row in enumerate(todo, start=1):
-        extra = paths.get(row["uuid"])
-        sources = [("original", row["path"])]
-        if extra is not None:
-            sources = [
-                ("original", extra.path or row["path"]),
-                ("edited", extra.path_edited),
-                ("live", extra.path_live),
-            ]
-        for kind, source in sources:
+        for kind, source in sources_for(row):
             if not source or (row["uuid"], kind) in done:
                 continue
             src = Path(source)

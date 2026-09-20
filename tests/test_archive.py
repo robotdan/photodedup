@@ -8,7 +8,7 @@ import pytest
 
 from photodedup.archive import ArchiveSpace, dest_for, pending_losers, run_archive
 from photodedup.arbitrate import run_arbitrate
-from photodedup.catalog import StageIncomplete, open_catalog, set_stage
+from photodedup.catalog import StageIncomplete, get_stage, open_catalog, set_stage
 from photodedup.library import AssetPaths
 
 NOW = datetime(2026, 9, 20, 12, 0, 0)
@@ -153,3 +153,49 @@ def test_missing_source_is_reported_not_fatal(decided, tmp_path):
 def test_limit_caps_the_run(decided, tmp_path):
     result = run_archive(decided, tmp_path / "archive", limit=0, free_bytes=lambda p: 10**9)
     assert result.copied == 0
+
+
+def test_limit_zero_reports_nothing_skipped(decided, tmp_path):
+    result = run_archive(decided, tmp_path / "archive", limit=0, free_bytes=lambda p: 10**9)
+    assert (result.copied, result.skipped) == (0, 0)
+
+
+def test_edited_file_missing_on_first_run_is_archived_on_the_next(decided, tmp_path):
+    edited = tmp_path / "lib" / "b_edited.jpg"
+    paths = {"b": AssetPaths("b", str(tmp_path / "lib" / "b.jpg"), str(edited), None)}
+    root = tmp_path / "archive"
+
+    first = run_archive(decided, root, paths=paths, free_bytes=lambda p: 10**9)
+    assert first.copied == 1 and first.missing == 1
+    assert get_stage(decided, "archive")["status"] != "complete"
+
+    edited.write_bytes(b"E" * 5)
+    second = run_archive(decided, root, paths=paths, free_bytes=lambda p: 10**9)
+    assert second.copied == 1 and second.missing == 0
+    assert get_stage(decided, "archive")["status"] == "complete"
+    kinds = {r["kind"] for r in decided.execute("SELECT kind FROM archive_file WHERE uuid='b'")}
+    assert kinds == {"original", "edited"}
+
+
+def test_dest_sanitises_filename():
+    row = {"uuid": "z", "photos_date": None, "original_filename": "../evil/../x.jpg"}
+    result = dest_for(row, "original", "/lib/z.jpg")
+    assert ".." not in result.split("/")
+    assert "/" not in result.rsplit("/", 1)[-1]
+
+    hidden = {"uuid": "z", "photos_date": None, "original_filename": ".hidden.jpg"}
+    assert dest_for(hidden, "original", "/lib/z.jpg") == "undated/z_hidden.jpg"
+
+
+def test_refuses_when_the_volume_is_not_mounted(decided, tmp_path, monkeypatch):
+    fake_volume = Path("/Volumes/Nope")
+    real_exists = Path.exists
+
+    def fake_exists(self):
+        return True if self == fake_volume else real_exists(self)
+
+    monkeypatch.setattr(Path, "exists", fake_exists)
+    monkeypatch.setattr("os.path.ismount", lambda p: False)
+
+    with pytest.raises(ArchiveSpace):
+        run_archive(decided, fake_volume / "x", free_bytes=lambda p: 10**9)
