@@ -34,6 +34,9 @@ KEEPER_RULES: tuple[str, ...] = (
 )
 
 # A copy whose name Photos or Finder suffixed on import: "IMG_0001 (1).jpg".
+# Also matches "party (2019).jpg"; acceptable, because this rule is reached
+# only when every content rule above it has tied, so it picks between two
+# names for the same photograph and never between two photographs.
 _SUFFIXED_NAME = re.compile(r"\s?\(\d+\)\.[^.]+$")
 
 SIZE_SPREAD_BYTES = 1_000_000

@@ -1,8 +1,9 @@
 # Photo De-duplication — Working State
 
 **Last updated:** 2026-09-19
-**Current phase:** Phase 3 (arbitrate, review report) — BUILD COMPLETE at
-HEAD; not yet run against the real catalog.
+**Current phase:** Phase 3 (arbitrate, review report) — built, run once, and
+amended after the user's sampling. Schema is now v4; the catalog must be
+rebuilt before the amended rules are run.
 **Branch:** `main`
 **Spec:** docs/superpowers/specs/2026-09-18-photo-dedup-design.md (binding authority)
 **Phase 2 plan:** docs/superpowers/plans/2026-09-19-photo-dedup-phase2-hash-group.md
@@ -10,7 +11,7 @@ HEAD; not yet run against the real catalog.
 
 ## The one outstanding action
 
-Rebuild the catalog at schema v3 and run the pipeline through `review`, in
+Rebuild the catalog at schema v4 and run the pipeline through `review`, in
 your own terminal (the agent shell cannot start the process pool):
 
     cd /Users/robotdan/dev/tools
@@ -501,6 +502,21 @@ all added within two minutes on 2025-03-12, is unexplained. It is NOT in
 
 ## Domain decisions
 
+- 2026-09-20, from the user, after sampling: a copy that lost rows at the
+  bottom is damaged even when its structure is complete (IMAG0136's largest
+  copy has an EOI and 144 blank rows). The hash stage now measures
+  `blank_rows` (uniform-colour rows at the bottom of the decode) and `flat`
+  (every row blank); the keeper rule `rendered` prefers fewer blank rows
+  right after `intact`; sets with a partially rendered member carry
+  `partial_render`, sets of entirely flat images carry `blank_image`
+  (nine flat images in this library, to be offered for deletion in Phase
+  4), and flat images never join the look-alike tier.
+- 2026-09-20, from the user: when everything else ties, keep the copy whose
+  name has no " (1)" style suffix (`clean_name`, just before `date_added`).
+- 2026-09-20, from the user: the candidate (look-alike) tier is left out of
+  Phase 4 entirely; macOS Photos' own Duplicates feature can be used on
+  whatever remains. Members of a candidate set differ in bytes and pixels,
+  so they are never assumed to be copies.
 - 2026-09-20, from the user, after sampling the review report: a copy that
   carries Photos edits (a crop, a colour adjustment) is a distinct
   photograph and is never a loser, whatever its ranking. `split_protected`

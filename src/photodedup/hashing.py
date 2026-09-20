@@ -154,6 +154,8 @@ def blank_tail(pixels: bytes, width: int, height: int) -> int:
     one measure of damage that survives a "structurally complete" file. On a
     genuine photo with a flat bottom border the number is small and, between
     true duplicates, identical, so ranking on it never separates real copies.
+    JPEG block ringing can undercount a real border by up to eight rows; the
+    count is a ranking signal within one set, never a threshold.
     """
     row = width * 3
     if row == 0 or height == 0:
@@ -218,7 +220,7 @@ def pixel_hashes(
                 width=width,
                 height=height,
                 blank_rows=blank,
-                flat=blank == height,
+                flat=height > 0 and blank == height,
             )
     except Exception:
         return None
