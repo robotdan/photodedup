@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from sqlite3 import Connection
 
-from photodedup.catalog import StageIncomplete, set_stage
+from photodedup.catalog import StageIncomplete, require_stage_complete, set_stage
 from photodedup.photos_write import PhotosWriter
 
 BATCH = 500
@@ -42,7 +42,15 @@ def _now(now: datetime | None) -> str:
 
 
 def require_archive(conn: Connection) -> None:
-    """Every pending loser must have a verified archived original."""
+    """Every pending loser must have a verified archived original, and the
+    archive stage itself must be complete.
+
+    The two checks catch different half-finished states: the count catches a
+    resolvable loser with no archived original at all; the stage check
+    catches a loser whose original copied but whose edited or live render
+    did not, which the count alone (it only looks at `kind='original'`)
+    would miss while the archive stage sits at 'running'.
+    """
     missing = conn.execute(
         """
         SELECT COUNT(*) AS n
@@ -59,15 +67,21 @@ def require_archive(conn: Connection) -> None:
             f"{missing} losers have no verified archive copy. Run `photodedup archive` "
             "until it reports 0 mismatched and 0 missing."
         )
+    require_stage_complete(conn, "archive")
 
 
 def _record(conn: Connection, uuid: str, action: str, status: str, detail: dict, previous: dict | None, now: datetime | None) -> None:
+    """Record an apply attempt. `previous` keeps the EARLIEST non-null value
+    ever recorded for this (uuid, action): a retry after a partial failure
+    must not overwrite the true pre-write state with the post-partial state
+    the retry itself observed, or the undo record is falsified."""
     conn.execute(
         """INSERT INTO apply_action (uuid, action, status, detail, previous, applied_at)
            VALUES (?, ?, ?, ?, ?, ?)
            ON CONFLICT (uuid, action) DO UPDATE SET
                status = excluded.status, detail = excluded.detail,
-               previous = excluded.previous, applied_at = excluded.applied_at""",
+               previous = COALESCE(apply_action.previous, excluded.previous),
+               applied_at = excluded.applied_at""",
         (uuid, action, status, json.dumps(detail, sort_keys=True),
          json.dumps(previous, sort_keys=True) if previous is not None else None, _now(now)),
     )
@@ -78,6 +92,22 @@ def _done(conn: Connection, action: str) -> set[str]:
     return {
         r["uuid"] for r in conn.execute(
             "SELECT uuid FROM apply_action WHERE action = ? AND status = 'done'", (action,)
+        )
+    }
+
+
+def _merge_done_losers(conn: Connection) -> dict[str, list[str]]:
+    """uuid -> sorted losers list recorded on its last successful merge.
+
+    A keeper is only truly done when the losers it was merged from match the
+    losers it currently has: a re-arbitrate can attach a new loser (with new
+    carries) to an already-merged keeper, and that must trigger another
+    merge rather than being skipped as already-done.
+    """
+    return {
+        r["uuid"]: sorted(json.loads(r["detail"]).get("losers", []))
+        for r in conn.execute(
+            "SELECT uuid, detail FROM apply_action WHERE action = 'merge' AND status = 'done'"
         )
     }
 
@@ -122,25 +152,25 @@ def _merged_carries(targets: list[MergeTarget]) -> dict[str, dict]:
 def run_merge(conn: Connection, writer: PhotosWriter, *, dry_run: bool = False, now: datetime | None = None) -> ApplyResult:
     require_archive(conn)
     combined = _merged_carries(merge_targets(conn))
-    done_before = _done(conn, "merge")
+    done_losers = _merge_done_losers(conn)
     done = failed = skipped = 0
     if not dry_run:
         set_stage(conn, "apply", "running")
     for keeper in sorted(combined):
         carry = combined[keeper]
-        if keeper in done_before:
+        if done_losers.get(keeper) == sorted(carry["losers"]):
             skipped += 1
             continue
         if dry_run:
             continue
+        state = writer.get(keeper)
+        previous = {
+            "title": state.title, "description": state.description,
+            "keywords": list(state.keywords), "favorite": state.favorite,
+            "albums": list(state.albums),
+        }
+        written: dict = {}
         try:
-            state = writer.get(keeper)
-            previous = {
-                "title": state.title, "description": state.description,
-                "keywords": list(state.keywords), "favorite": state.favorite,
-                "albums": list(state.albums),
-            }
-            written: dict = {}
             albums = [a for a in carry["albums"] if a not in state.albums]
             for album in albums:
                 writer.add_to_album(writer.ensure_album(album), [keeper])
@@ -163,7 +193,7 @@ def run_merge(conn: Connection, writer: PhotosWriter, *, dry_run: bool = False, 
             _record(conn, keeper, "merge", "done", written, previous, now)
             done += 1
         except Exception as exc:
-            _record(conn, keeper, "merge", "failed", {"error": str(exc)}, None, now)
+            _record(conn, keeper, "merge", "failed", {"error": str(exc), "written": written}, previous, now)
             failed += 1
     return ApplyResult(done, failed, skipped)
 
@@ -202,21 +232,22 @@ def run_dates(conn: Connection, writer: PhotosWriter, *, include_disagreeing: bo
             continue
         if dry_run:
             continue
+        previous = None
         try:
             before = writer.get(target.keeper).date
+            previous = {"date": before.isoformat() if before else None}
             writer.set_date(target.keeper, target.value)
             after = writer.get(target.keeper).date
-            previous = {"date": before.isoformat() if before else None}
             if after is not None and abs((after - target.value).total_seconds()) <= 1:
                 _record(conn, target.keeper, "date", "done", {"date": target.value.isoformat()}, previous, now)
                 done += 1
             else:
                 _record(conn, target.keeper, "date", "failed",
-                        {"wanted": target.value.isoformat(), "read_back": after.isoformat() if after else None, "set_id": target.set_id},
+                        {"wanted": target.value.isoformat(), "read_back": after.isoformat() if after else None},
                         previous, now)
                 failed += 1
         except Exception as exc:
-            _record(conn, target.keeper, "date", "failed", {"error": str(exc), "set_id": target.set_id}, None, now)
+            _record(conn, target.keeper, "date", "failed", {"error": str(exc)}, previous, now)
             failed += 1
     return ApplyResult(done, failed, skipped)
 

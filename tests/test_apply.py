@@ -95,6 +95,20 @@ def test_require_archive_counts_missing_losers(conn):
     require_archive(conn)
 
 
+def test_require_archive_needs_the_archive_stage_complete(conn):
+    add_asset(conn, "k", size=20); add_asset(conn, "l", size=10)
+    add_set(conn, 1, ["k", "l"]); run_arbitrate(conn, now=NOW)
+    conn.execute(
+        """INSERT INTO archive_file (uuid, kind, dest, bytes, sha256, verified_at)
+           VALUES ('l', 'original', '2014/05/l.jpg', 1, 'x', 'now')"""
+    )
+    set_stage(conn, "archive", "running")
+    conn.commit()
+    with pytest.raises(StageIncomplete) as exc:
+        require_archive(conn)
+    assert "archive stage" in str(exc.value)
+
+
 def test_merge_targets_come_from_carries(merged):
     [t] = merge_targets(merged)
     assert t.keeper == "k" and t.loser == "l"
@@ -144,6 +158,48 @@ def test_merge_failure_is_recorded_and_run_continues(conn):
     rows = {r["uuid"]: r["status"] for r in conn.execute("SELECT uuid, status FROM apply_action")}
     assert rows == {"k1": "failed", "k2": "done"}
     assert fake.get("k2").favorite is True
+
+
+def test_merge_failure_preserves_previous_across_partial_write_and_retry(conn):
+    add_asset(conn, "k", size=20)
+    add_asset(conn, "l", size=10, keywords=("y",), favorite=1)
+    add_set(conn, 1, ["k", "l"]); run_arbitrate(conn, now=NOW); archived(conn, "l")
+    fake = fake_for(conn)
+    fake.fail_on = {("set_favorite", "k")}
+    pre_write_previous = {"title": "", "description": "", "keywords": [], "favorite": False, "albums": []}
+
+    result = run_merge(conn, fake, now=NOW)
+    assert result.failed == 1
+    row = conn.execute("SELECT * FROM apply_action WHERE uuid='k' AND action='merge'").fetchone()
+    assert row["status"] == "failed"
+    assert json.loads(row["previous"]) == pre_write_previous
+    assert json.loads(row["detail"])["written"] == {"keywords": ["y"]}
+
+    fake.fail_on = set()
+    result2 = run_merge(conn, fake, now=NOW)
+    assert result2.done == 1
+    row2 = conn.execute("SELECT * FROM apply_action WHERE uuid='k' AND action='merge'").fetchone()
+    assert row2["status"] == "done"
+    assert json.loads(row2["previous"]) == pre_write_previous
+
+
+def test_merge_remerges_when_new_carries_appear_after_rearbitrate(merged):
+    fake = fake_for(merged)
+    run_merge(merged, fake, now=NOW)
+
+    add_asset(merged, "l2", size=5, albums=("C",))
+    merged.execute("INSERT INTO dup_set_member (set_id, uuid, tier, signals) VALUES (1, 'l2', 'exact', 'scan')")
+    merged.execute("UPDATE dup_set SET size = size + 1 WHERE id = 1")
+    merged.commit()
+    run_arbitrate(merged, now=NOW)
+    archived(merged, "l2")
+    fake.photos["l2"] = {"title": "", "description": "", "keywords": [], "favorite": False, "date": None}
+
+    result = run_merge(merged, fake, now=NOW)
+    assert result.done == 1
+    assert fake.album_members("C") == ["k"]
+    row = merged.execute("SELECT * FROM apply_action WHERE uuid='k' AND action='merge'").fetchone()
+    assert sorted(json.loads(row["detail"])["losers"]) == ["l", "l2"]
 
 
 def test_merge_dry_run_writes_nothing(merged):
