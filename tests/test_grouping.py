@@ -321,3 +321,49 @@ def test_truncated_with_no_partner_forms_no_group(conn, tmp_path):
     cut, length = truncate(intact, tmp_path / "a_cut.jpg")
     add_file(conn, "tr1", cut, status="truncated", bytes_read=length)
     assert run_group(conn).groups == 0
+
+
+def test_partner_diverging_within_the_probe_is_rejected_without_a_full_read(
+    conn, tmp_path, monkeypatch
+):
+    """On the real catalog a truncated file draws thousands of same-dimension
+    partner candidates; reading each one's full prefix to reject it is the
+    32 GB problem. A 64 KB head comparison must reject a diverging partner
+    without ever requesting its full-length prefix, and a real match must
+    still be found."""
+    import photodedup.grouping as grouping_module
+
+    length = grouping_module.PREFIX_PROBE_BYTES + 5000
+    head_bytes = bytes(i % 256 for i in range(length))
+
+    truncated_path = tmp_path / "tr.bin"
+    truncated_path.write_bytes(head_bytes)
+
+    matching_path = tmp_path / "match.bin"
+    matching_path.write_bytes(head_bytes + b"trailing-bytes-not-in-the-prefix")
+
+    diverging = bytearray(head_bytes)
+    diverging[100] = (diverging[100] + 1) % 256  # diverges well inside 64 KB
+    diverging_path = tmp_path / "diverge.bin"
+    diverging_path.write_bytes(bytes(diverging))
+
+    add_file(conn, "tr1", truncated_path, status="truncated", bytes_read=length)
+    add_file(conn, "ok_match", matching_path, status="ok", scan="s1", pixel="p1")
+    add_file(conn, "ok_diverge", diverging_path, status="ok", scan="s2", pixel="p2")
+
+    requests: dict[str, list[int]] = {}
+    real_read = grouping_module._read_prefix
+
+    def spy(path, n):
+        requests.setdefault(path, []).append(n)
+        return real_read(path, n)
+
+    monkeypatch.setattr(grouping_module, "_read_prefix", spy)
+
+    pairs = prefix_groups(conn)
+
+    assert requests[str(diverging_path)] == [grouping_module.PREFIX_PROBE_BYTES]
+    assert requests[str(matching_path)] == [grouping_module.PREFIX_PROBE_BYTES, length]
+    assert len(pairs) == 1
+    digest, uuids = pairs[0]
+    assert set(uuids) == {"tr1", "ok_match"}

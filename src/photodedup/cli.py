@@ -8,7 +8,12 @@ from pathlib import Path
 import click
 
 from photodedup.arbitrate import run_arbitrate
-from photodedup.catalog import StageIncomplete, open_catalog, require_stage_complete
+from photodedup.catalog import (
+    StageIncomplete,
+    open_catalog,
+    require_stage_complete,
+    set_stage,
+)
 from photodedup.grouping import HashStageIncomplete, run_group
 from photodedup.hash_stage import HashStageInterrupted, run_hash
 from photodedup.library import LibraryUnavailable, iter_assets
@@ -174,11 +179,14 @@ def sets(catalog: Path, force: bool) -> None:
         require_stage_complete(conn, "group", force=force)
     except StageIncomplete as exc:
         raise click.ClickException(str(exc)) from exc
+    set_stage(conn, "sets", "running")
     result = run_sets(conn)
-    click.echo(
+    notes = (
         f"{result.exact_sets} exact sets over {result.exact_assets} assets; "
         f"{result.candidate_sets} candidate sets over {result.candidate_assets} assets"
     )
+    set_stage(conn, "sets", "complete", notes=notes)
+    click.echo(notes)
 
 
 @main.command()
@@ -213,13 +221,22 @@ def arbitrate(catalog: Path, margin_hours: float, force: bool) -> None:
 )
 @click.option("--per-page", type=int, default=250, show_default=True)
 @click.option("--sample", type=int, default=300, show_default=True, help="Sets per sampled section.")
+@click.option(
+    "--margin-hours", type=float, default=26.0, show_default=True,
+    help="Dates closer than this are one date rendered in two timezones, not a conflict.",
+)
 @click.option("--force", is_flag=True, help="Write the report even though arbitrate has not reported complete.")
-def review(catalog: Path, out: Path, per_page: int, sample: int, force: bool) -> None:
+def review(
+    catalog: Path, out: Path, per_page: int, sample: int, margin_hours: float, force: bool
+) -> None:
     """Write the static HTML review report. Open <out>/index.html in a browser."""
     conn = open_catalog(catalog)
     try:
-        result = write_review(conn, out, per_page=per_page, sample=sample, force=force)
-    except StageIncomplete as exc:
+        result = write_review(
+            conn, out, per_page=per_page, sample=sample, force=force,
+            margin=timedelta(hours=margin_hours),
+        )
+    except (StageIncomplete, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(
         f"wrote {out / 'index.html'}: {result.sets} sets on {result.pages} pages, "

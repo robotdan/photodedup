@@ -27,6 +27,13 @@ MULTIFRAME_UTIS: tuple[str, ...] = ("com.compuserve.gif", "org.webmproject.webp"
 
 _MULTIFRAME_SQL = ", ".join(f"'{u}'" for u in MULTIFRAME_UTIS)
 
+# A truncated file draws thousands of same-dimension partner candidates on a
+# real catalog. Reading every partner's full prefix (which can be most of the
+# file) to reject nearly all of them is wasteful; a 64 KB head comparison
+# rejects a non-match just as surely; a full-prefix match implies its own
+# first 64 KB matches, so the result is identical by construction.
+PREFIX_PROBE_BYTES = 65536
+
 
 class HashStageIncomplete(RuntimeError):
     """Grouping was asked to run before the hash stage finished."""
@@ -98,7 +105,15 @@ def prefix_groups(conn: Connection) -> list[tuple[str, list[str]]]:
                 "w": row["pw"], "h": row["ph"], "length": row["length"],
             },
         ).fetchall()
-        matches = [p for p in partners if _read_prefix(p["path"], row["length"]) == head]
+        probe_len = min(PREFIX_PROBE_BYTES, row["length"])
+        probe_head = head[:probe_len]
+        matches = []
+        for p in partners:
+            probe = _read_prefix(p["path"], probe_len)
+            if probe != probe_head:
+                continue
+            if _read_prefix(p["path"], row["length"]) == head:
+                matches.append(p)
         if not matches:
             continue
         digest = matches[0]["scan_hash"] or matches[0]["pixel_hash"]

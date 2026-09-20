@@ -168,7 +168,7 @@ def review_flags(
         flags.append("truncated_member")
     if any(m.hash_status not in ("ok", "truncated") for m in members):
         flags.append("unhashed_member")
-    intact_sizes = [m.file_size for m in members if m.hash_status != "truncated" and m.file_size is not None]
+    intact_sizes = [m.file_size for m in members if m.hash_status == "ok" and m.file_size is not None]
     if len(intact_sizes) > 1 and max(intact_sizes) - min(intact_sizes) >= SIZE_SPREAD_BYTES:
         flags.append("size_spread")
     # Impossible under rank_key. Computed from the data, not the rule, so a

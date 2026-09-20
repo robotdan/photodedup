@@ -1,4 +1,5 @@
 import json
+import shutil
 from html.parser import HTMLParser
 from pathlib import Path
 
@@ -212,3 +213,66 @@ def test_force_reports_only_decided_sets(populated, tmp_path):
     populated.commit()
     result = write_review(populated, tmp_path / "out", force=True)
     assert result.sets == 2
+
+
+def test_date_class_uses_the_margin_not_string_equality(conn, tmp_path):
+    """photos_date is compared as parsed instants against the margin, not as
+    strings: a timezone rendering of the arbitrated date must not paint
+    date-conflict just because the text differs."""
+    add_asset(conn, "k1", size=20, thumb_path=thumb(tmp_path, "k1.jpg"),
+              photos_date="2014-05-12T17:00:00")
+    add_asset(conn, "l1", size=10, thumb_path=thumb(tmp_path, "l1.jpg"),
+              photos_date="2014-05-12T20:00:00")
+    add_set(conn, 1, ["k1", "l1"])
+
+    add_asset(conn, "k2", size=20, thumb_path=thumb(tmp_path, "k2.jpg"),
+              photos_date="2014-06-01T00:00:00")
+    add_asset(conn, "l2", size=10, thumb_path=thumb(tmp_path, "l2.jpg"),
+              photos_date="2014-06-04T00:00:00")
+    add_set(conn, 2, ["k2", "l2"])
+
+    run_arbitrate(conn)
+    out = tmp_path / "out"
+    write_review(conn, out)
+    html = (out / "exact" / "001.html").read_text()
+    # l1's photos_date is 3 hours from the arbitrated date (k1's): agreement.
+    assert "<dd class='date-agree'>2014-05-12T20:00:00</dd>" in html
+    # l2's photos_date is 3 days from the arbitrated date (k2's): a conflict.
+    assert "<dd class='date-conflict'>2014-06-04T00:00:00</dd>" in html
+
+
+def test_refuses_to_clear_a_non_empty_out_dir_with_no_previous_report(populated, tmp_path):
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "someone_elses_file.txt").write_text("do not touch")
+    with pytest.raises(ValueError):
+        write_review(populated, out)
+    # Nothing was removed.
+    assert (out / "someone_elses_file.txt").exists()
+
+
+def test_rerun_into_a_previous_reports_directory_succeeds(populated, tmp_path):
+    out = tmp_path / "out"
+    write_review(populated, out)
+    result = write_review(populated, out)
+    assert result.sets == 3
+    assert (out / "index.html").exists()
+
+
+def test_symlink_at_thumbs_is_replaced_and_its_target_is_untouched(populated, tmp_path):
+    out = tmp_path / "out"
+    write_review(populated, out)
+
+    target_dir = tmp_path / "elsewhere"
+    target_dir.mkdir()
+    (target_dir / "keep.txt").write_text("do not touch")
+
+    shutil.rmtree(out / "thumbs")
+    (out / "thumbs").symlink_to(target_dir, target_is_directory=True)
+    assert (out / "thumbs").is_symlink()
+
+    write_review(populated, out)
+
+    assert not (out / "thumbs").is_symlink()
+    assert (out / "thumbs").is_dir()
+    assert (target_dir / "keep.txt").read_text() == "do not touch"

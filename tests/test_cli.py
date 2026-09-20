@@ -1,7 +1,7 @@
 import pytest
 from click.testing import CliRunner
 
-from photodedup.catalog import open_catalog, set_stage
+from photodedup.catalog import get_stage, open_catalog, set_stage
 from photodedup.cli import main
 
 
@@ -62,3 +62,5 @@ def test_sets_runs_on_grouped_catalog(catalog):
     result = run("sets", "--catalog", str(catalog))
     assert result.exit_code == 0, result.output
     assert "0 exact sets" in result.output
+    conn = open_catalog(catalog)
+    assert get_stage(conn, "sets")["status"] == "complete"

@@ -141,6 +141,14 @@ def test_real_length_of_zero_padded_truncation_matches_unpadded(tmp_path):
     assert real_length(padded) == real_length(plain)
 
 
+def test_intact_jpeg_is_not_truncated(tmp_path):
+    """A plain noisy JPEG with no trailing bytes has an EOI after its scan and
+    must not be flagged truncated."""
+    intact = make_noisy_jpeg(tmp_path / "intact.jpg")
+    data = intact.read_bytes()
+    assert jpeg_is_truncated(data) is False
+
+
 def test_jpeg_is_truncated_detects_cut_scan():
     """Truncation: cut 200 bytes before EOI (no EOI after SOS)."""
     img = Image.effect_noise((96, 64), 64).convert("RGB")

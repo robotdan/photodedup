@@ -135,3 +135,34 @@ def test_mixed_kinds_in_one_group_trip_the_wire(conn):
     with pytest.raises(SetsInconsistent):
         run_sets(conn)
     assert sets(conn) == []
+
+
+def test_tripwire_leaves_a_populated_dup_set_untouched(conn):
+    """The mixed-kind check runs before anything is deleted or written, so a
+    tripwire that fires later must not clobber sets a prior run already
+    wrote."""
+    add(conn, "u1", scan="s")
+    add(conn, "u2", scan="s")
+    run_group(conn)
+    before_sets = [dict(r) for r in sets(conn)]
+    before_members = {
+        s["id"]: dict(members(conn, s["id"])) for s in sets(conn)
+    }
+    assert before_sets  # the valid pair really did populate dup_set
+
+    add(conn, "v1", kind="image")
+    add(conn, "v2", kind="video")
+    conn.execute("INSERT INTO dup_group (id, signal, tier, digest, size) VALUES (99, 'scan', 'exact', 'y', 2)")
+    conn.execute("INSERT INTO dup_member VALUES (99, 'v1')")
+    conn.execute("INSERT INTO dup_member VALUES (99, 'v2')")
+    conn.commit()
+
+    with pytest.raises(SetsInconsistent):
+        run_sets(conn)
+
+    after_sets = [dict(r) for r in sets(conn)]
+    after_members = {
+        s["id"]: dict(members(conn, s["id"])) for s in sets(conn)
+    }
+    assert after_sets == before_sets
+    assert after_members == before_members

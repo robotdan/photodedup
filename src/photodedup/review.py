@@ -12,13 +12,14 @@ import json
 import os
 import shutil
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from sqlite3 import Connection, Row
 
 import imagehash
 
 from photodedup.catalog import StageIncomplete, require_stage_complete, set_stage
+from photodedup.dates import DEFAULT_DISAGREEMENT_MARGIN
 
 CSS = """
 body { font: 14px/1.4 -apple-system, Helvetica, Arial, sans-serif; margin: 1.5rem; color: #222; }
@@ -117,15 +118,22 @@ def _load(conn: Connection) -> list[dict]:
     return out
 
 
-def _date_class(member: Row, s: Row) -> str:
-    if not member["photos_date"]:
+def _date_class(member: Row, s: Row, margin: timedelta) -> str:
+    """Compare parsed instants, not rendered strings: a timezone rendering of
+    the same instant must not paint as a conflict."""
+    if not member["photos_date"] or not s["date_value"]:
         return "date-missing"
-    if not s["date_value"]:
+    try:
+        member_date = datetime.fromisoformat(member["photos_date"])
+        set_date = datetime.fromisoformat(s["date_value"])
+    except ValueError:
         return "date-missing"
-    return "date-agree" if member["photos_date"] == s["date_value"] else "date-conflict"
+    return "date-agree" if abs(member_date - set_date) <= margin else "date-conflict"
 
 
-def _render_set(entry: dict, thumbs_dir: Path, *, depth: int, counters: dict) -> str:
+def _render_set(
+    entry: dict, thumbs_dir: Path, *, depth: int, counters: dict, margin: timedelta
+) -> str:
     s = entry["set"]
     flags = s["review_flags"]
     status = (
@@ -160,7 +168,7 @@ def _render_set(entry: dict, thumbs_dir: Path, *, depth: int, counters: dict) ->
             f"<div class='member{' keeper' if is_keeper else ''}'>{img}<dl>"
             f"<dt>file</dt><dd>{_e(m['original_filename'])}</dd>"
             f"<dt>bytes</dt><dd>{_e(m['file_size'])}</dd>"
-            f"<dt>photos</dt><dd class='{_date_class(m, s)}'>{_e(m['photos_date'] or 'missing')}</dd>"
+            f"<dt>photos</dt><dd class='{_date_class(m, s, margin)}'>{_e(m['photos_date'] or 'missing')}</dd>"
             f"<dt>added</dt><dd>{_e(m['date_added'])}</dd>"
             f"<dt>hash</dt><dd>{_e(m['hash_status'])}</dd>"
             f"<dt>{'keeper' if is_keeper else 'lost on'}</dt>"
@@ -183,6 +191,19 @@ def _nav(prefix: str, count: int, current: int) -> str:
     return f"<nav><a href='../index.html'>index</a> {prefix}: {' '.join(links)}</nav>"
 
 
+def _refuse_unsafe_out_dir(out_dir: Path) -> None:
+    """Refuse to clear *out_dir* unless it is empty, absent, or a previous
+    report (marked by `review.css`). Anything else is someone else's data."""
+    if not out_dir.exists():
+        return
+    if any(out_dir.iterdir()) and not (out_dir / "review.css").exists():
+        raise ValueError(
+            f"{out_dir} is not empty and does not look like a previous review "
+            "report (no review.css); refusing to delete its contents. Point "
+            "--out at an empty or new directory."
+        )
+
+
 def write_review(
     conn: Connection,
     out_dir: Path,
@@ -190,6 +211,7 @@ def write_review(
     per_page: int = 250,
     sample: int = 300,
     force: bool = False,
+    margin: timedelta = DEFAULT_DISAGREEMENT_MARGIN,
 ) -> ReviewResult:
     require_stage_complete(conn, "arbitrate", force=force)
     missing = conn.execute(
@@ -207,12 +229,20 @@ def write_review(
     set_stage(conn, "review", "running")
 
     out_dir = Path(out_dir)
+    _refuse_unsafe_out_dir(out_dir)
     # Regenerated in full every run: a shrinking rerun must not leave stale
     # pages or thumbnails behind. thumbs/ holds only symlinks or copies of
     # Photos derivatives, so removing it touches nothing in the library.
     for sub in ("exact", "candidate", "samples", "thumbs"):
-        shutil.rmtree(out_dir / sub, ignore_errors=True)
-        (out_dir / sub).mkdir(parents=True, exist_ok=True)
+        target = out_dir / sub
+        if target.is_symlink():
+            target.unlink()
+        else:
+            try:
+                shutil.rmtree(target)
+            except FileNotFoundError:
+                pass
+        target.mkdir(parents=True, exist_ok=True)
     (out_dir / "review.css").write_text(CSS)
     thumbs_dir = out_dir / "thumbs"
     # Sets of uuids: a member rendered on a listing page and again on a sample
@@ -228,7 +258,8 @@ def write_review(
         chunks = _paginate(items, per_page)
         for i, chunk in enumerate(chunks, start=1):
             body = _nav(name, len(chunks), i) + "".join(
-                _render_set(e, thumbs_dir, depth=1, counters=counters) for e in chunk
+                _render_set(e, thumbs_dir, depth=1, counters=counters, margin=margin)
+                for e in chunk
             )
             (out_dir / name / f"{i:03d}.html").write_text(
                 _page(f"{name} sets, page {i} of {len(chunks)}", body, depth=1)
@@ -236,6 +267,8 @@ def write_review(
         return len(chunks)
 
     pages += write_listing("exact", exact)
+    # 999 is a safe sentinel for "no phash distance": a 64-bit phash distance
+    # never exceeds 64, so it always sorts last.
     candidate_sorted = sorted(
         candidate,
         key=lambda e: (e["phash_distance"] if e["phash_distance"] is not None else 999, e["set"]["id"]),
@@ -250,11 +283,16 @@ def write_review(
         return max(sizes) - min(sizes) if sizes else 0
 
     def keeper_gap(e: dict) -> float:
-        """Seconds between the arbitrated date and the keeper's own Photos date."""
+        """Seconds between the arbitrated date and the keeper's own Photos date.
+
+        -1.0 for "unknown" (not inf): sorted by -keeper_gap for "largest
+        disagreement first", -1.0 lands after every real (non-negative) gap,
+        so a no-date keeper sorts last instead of first.
+        """
         s = e["set"]
         keeper = next((m for m in e["members"] if m["uuid"] == s["keeper_uuid"]), None)
         if keeper is None or not keeper["photos_date"] or not s["date_value"]:
-            return float("inf")
+            return -1.0
         return abs(
             (datetime.fromisoformat(s["date_value"]) - datetime.fromisoformat(keeper["photos_date"])).total_seconds()
         )
@@ -275,7 +313,10 @@ def write_review(
     ]
     for key, title, items in samples:
         body = "<nav><a href='../index.html'>index</a></nav>" + (
-            "".join(_render_set(e, thumbs_dir, depth=1, counters=counters) for e in items)
+            "".join(
+                _render_set(e, thumbs_dir, depth=1, counters=counters, margin=margin)
+                for e in items
+            )
             or "<p>none</p>"
         )
         (out_dir / "samples" / f"{key}.html").write_text(_page(title, body, depth=1))

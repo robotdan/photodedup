@@ -121,7 +121,6 @@ def test_keeper_smaller_tripwire_fires_on_a_wrong_keeper():
     decision = Decision(datetime(2014, 5, 12, 17, 0, 0), "exif", (), False, None)
     flags = review_flags("exact", [small, big], small, decision)
     assert flags == ["keeper_smaller"]
-    assert "keeper_smaller" not in {"size_spread", "dates_disagree"}
 
 
 def test_unhashed_member_never_wins_and_blocks():

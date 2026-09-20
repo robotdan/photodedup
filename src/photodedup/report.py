@@ -6,7 +6,12 @@ from datetime import datetime
 from sqlite3 import Connection
 
 from photodedup.catalog import get_run
-from photodedup.dates import DEFAULT_DISAGREEMENT_MARGIN, Candidate, rejection_reason
+from photodedup.dates import (
+    DEFAULT_DISAGREEMENT_MARGIN,
+    Candidate,
+    choose_date,
+    rejection_reason,
+)
 
 # Seconds of difference below which two dates for the same asset are treated as
 # a timezone rendering of the same instant rather than a real conflict.
@@ -149,6 +154,47 @@ def _parse(value: str | None) -> datetime | None:
     return None if value is None else datetime.fromisoformat(value)
 
 
+def candidate_disagreements(conn: Connection) -> int:
+    """Assets whose surviving date candidates disagree beyond the margin.
+
+    Was SQL (`HAVING MAX(c.value) > MIN(c.value)`, no margin at all): any two
+    surviving candidates a second apart counted as a disagreement, and the
+    rule lived in two places. This loads every candidate per asset and asks
+    `choose_date`, the one date authority, instead of re-expressing its rule.
+    The stored `rejected_reason` column is not trusted here either, for the
+    same reason `exif_vs_photos_db` does not trust it: each candidate is
+    re-evaluated through `rejection_reason` directly.
+    """
+    rows = conn.execute(
+        """
+        SELECT a.uuid AS uuid, a.date_added AS added, a.file_mtime AS mtime,
+               c.source AS source, c.value AS value
+        FROM asset a
+        LEFT JOIN date_candidate c ON c.uuid = a.uuid AND c.value IS NOT NULL
+        WHERE a.survey_status = 'ok'
+        ORDER BY a.uuid
+        """
+    ).fetchall()
+
+    per_asset: dict[str, dict] = {}
+    for row in rows:
+        entry = per_asset.setdefault(
+            row["uuid"],
+            {"added": _parse(row["added"]), "mtime": _parse(row["mtime"]), "candidates": []},
+        )
+        if row["source"] is not None:
+            entry["candidates"].append(Candidate(row["source"], _parse(row["value"]), None))
+
+    count = 0
+    for entry in per_asset.values():
+        decision = choose_date(
+            entry["candidates"], date_added=entry["added"], file_mtime=entry["mtime"]
+        )
+        if decision.review_reason == "candidates_disagree":
+            count += 1
+    return count
+
+
 def sentinel_breakdown(conn: Connection) -> list[tuple[str, str, int]]:
     """Which sentinel values actually fired, by source, largest bucket first.
 
@@ -246,18 +292,7 @@ def survey_report(conn: Connection) -> str:
         ORDER BY c.source, n DESC
         """
     ).fetchall()
-    disagreements = conn.execute(
-        """
-        SELECT COUNT(*) AS n FROM (
-            SELECT c.uuid
-            FROM date_candidate c
-            JOIN asset a ON a.uuid = c.uuid AND a.survey_status = 'ok'
-            WHERE c.rejected_reason IS NULL AND c.value IS NOT NULL
-            GROUP BY c.uuid
-            HAVING MAX(c.value) > MIN(c.value)
-        )
-        """
-    ).fetchone()["n"]
+    disagreements = candidate_disagreements(conn)
     no_candidate = conn.execute(
         """
         SELECT COUNT(*) AS n FROM asset a

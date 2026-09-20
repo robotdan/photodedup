@@ -5,6 +5,7 @@ import pytest
 from photodedup.catalog import open_catalog
 from photodedup.library import AssetRecord
 from photodedup.report import (
+    candidate_disagreements,
     date_added_clusters,
     exif_vs_photos_db,
     photos_date_clusters,
@@ -271,6 +272,39 @@ def test_error_rows_are_excluded_from_aggregates(conn):
     assert "| image | 1 |" in kinds
     assert "None" not in kinds
     assert "| survey errors | 1 |" in report
+
+
+def test_candidate_disagreements_ignores_a_timezone_sized_gap(conn):
+    """Was SQL with no margin at all; two surviving candidates 3 hours apart
+    must not count as a disagreement."""
+    conn.execute(
+        """INSERT INTO asset (uuid, survey_status, date_added, file_mtime)
+           VALUES ('close', 'ok', '2020-12-18T18:00:00', '2019-01-01T00:00:00')"""
+    )
+    conn.execute(
+        "INSERT INTO date_candidate (uuid, source, value) VALUES ('close', 'exif', '2014-05-12T17:00:00')"
+    )
+    conn.execute(
+        "INSERT INTO date_candidate (uuid, source, value) VALUES ('close', 'filename', '2014-05-12T20:00:00')"
+    )
+    conn.commit()
+    assert candidate_disagreements(conn) == 0
+
+
+def test_candidate_disagreements_counts_a_real_conflict(conn):
+    """Two surviving candidates 3 days apart is a real disagreement."""
+    conn.execute(
+        """INSERT INTO asset (uuid, survey_status, date_added, file_mtime)
+           VALUES ('far', 'ok', '2020-12-18T18:00:00', '2019-01-01T00:00:00')"""
+    )
+    conn.execute(
+        "INSERT INTO date_candidate (uuid, source, value) VALUES ('far', 'exif', '2014-05-12T17:00:00')"
+    )
+    conn.execute(
+        "INSERT INTO date_candidate (uuid, source, value) VALUES ('far', 'filename', '2014-05-15T17:00:00')"
+    )
+    conn.commit()
+    assert candidate_disagreements(conn) == 1
 
 
 def test_exif_vs_photos_db_treats_a_stamped_photos_date_as_rejected(conn):
