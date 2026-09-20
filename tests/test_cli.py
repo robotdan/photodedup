@@ -70,3 +70,25 @@ def test_archive_refuses_before_arbitrate(catalog, tmp_path):
     result = run("archive", "--catalog", str(catalog), "--root", str(tmp_path / "arc"))
     assert result.exit_code != 0
     assert "arbitrate stage" in result.output
+
+
+def test_apply_with_no_flags_prints_the_plan(catalog):
+    conn = open_catalog(catalog); set_stage(conn, "arbitrate", "complete"); set_stage(conn, "archive", "complete"); conn.close()
+    result = run("apply", "--catalog", str(catalog))
+    assert result.exit_code == 0, result.output
+    assert "--merge" in result.output and "Nothing is deleted" in result.output
+
+
+def test_apply_refuses_without_archive(catalog):
+    conn = open_catalog(catalog); set_stage(conn, "arbitrate", "complete"); conn.close()
+    result = run("apply", "--catalog", str(catalog), "--stage")
+    assert result.exit_code != 0
+    assert "archive stage" in result.output
+
+
+def test_apply_real_write_needs_a_gui_session(catalog, tmp_path):
+    """In this shell photoscript cannot load; the command must say so plainly."""
+    conn = open_catalog(catalog); set_stage(conn, "arbitrate", "complete"); set_stage(conn, "archive", "complete"); conn.close()
+    result = run("apply", "--catalog", str(catalog), "--stage")
+    assert result.exit_code != 0
+    assert "interactive" in result.output or "Photos cannot be scripted" in result.output

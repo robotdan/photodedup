@@ -276,3 +276,163 @@ def plan_lines(conn: Connection, *, include_disagreeing: bool = False) -> list[s
         f"--stage: {losers} losers into '{FOLDER}' albums of {BATCH}, plus {blank} blank-image keepers into '{BLANK_ALBUM}'",
         "Nothing is deleted. Delete the staged albums yourself in Photos.",
     ]
+
+
+# --- stage -----------------------------------------------------------------
+
+
+def _stage_population(conn: Connection) -> tuple[list[str], list[str]]:
+    losers = [
+        r["uuid"] for r in conn.execute(
+            """SELECT l.uuid FROM decision_loser l
+               JOIN dup_set s ON s.id = l.set_id AND s.tier = 'exact'
+               JOIN decision d ON d.set_id = l.set_id AND d.resolvable = 1
+               ORDER BY l.uuid"""
+        )
+    ]
+    blank_keepers = [
+        r["keeper_uuid"] for r in conn.execute(
+            """SELECT d.keeper_uuid FROM decision d JOIN dup_set s ON s.id = d.set_id
+               WHERE s.tier = 'exact' AND ',' || d.review_flags || ',' LIKE '%,blank_image,%'
+               ORDER BY d.keeper_uuid"""
+        )
+    ]
+    return losers, blank_keepers
+
+
+def _album_counts(conn: Connection) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for r in conn.execute("SELECT detail FROM apply_action WHERE action = 'stage' AND status = 'done'"):
+        name = json.loads(r["detail"]).get("album")
+        if name:
+            counts[name] = counts.get(name, 0) + 1
+    return counts
+
+
+def _album_name(index: int) -> str:
+    return f"{FOLDER} {index:03d}"
+
+
+def run_stage(conn: Connection, writer: PhotosWriter, *, batch: int = BATCH, dry_run: bool = False, now: datetime | None = None) -> ApplyResult:
+    """Put every loser in a numbered album under the Dedup Delete folder.
+
+    Albums fill in order and a re-run continues in the first album that
+    still has room, so numbering never restarts and no loser is staged twice.
+    """
+    require_archive(conn)
+    losers, blank_keepers = _stage_population(conn)
+    done_stage = _done(conn, "stage")
+    done_blank = _done(conn, "stage_blank")
+    done = failed = skipped = 0
+    if not dry_run:
+        set_stage(conn, "apply", "running")
+
+    counts = _album_counts(conn)
+    index = max([int(name.rsplit(" ", 1)[1]) for name in counts] or [1])
+    while counts.get(_album_name(index), 0) >= batch:
+        index += 1
+
+    for uuid in losers:
+        if uuid in done_stage:
+            skipped += 1
+            continue
+        if dry_run:
+            continue
+        while counts.get(_album_name(index), 0) >= batch:
+            index += 1
+        name = _album_name(index)
+        try:
+            writer.add_to_album(writer.ensure_album(name, folder=FOLDER), [uuid])
+            _record(conn, uuid, "stage", "done", {"album": name}, None, now)
+            counts[name] = counts.get(name, 0) + 1
+            done += 1
+        except Exception as exc:
+            _record(conn, uuid, "stage", "failed", {"error": str(exc), "album": name}, None, now)
+            failed += 1
+
+    for uuid in blank_keepers:
+        if uuid in done_blank:
+            skipped += 1
+            continue
+        if dry_run:
+            continue
+        try:
+            writer.add_to_album(writer.ensure_album(BLANK_ALBUM), [uuid])
+            _record(conn, uuid, "stage_blank", "done", {"album": BLANK_ALBUM}, None, now)
+            done += 1
+        except Exception as exc:
+            _record(conn, uuid, "stage_blank", "failed", {"error": str(exc)}, None, now)
+            failed += 1
+    return ApplyResult(done, failed, skipped)
+
+
+def write_losers_csv(conn: Connection, path) -> int:
+    import csv
+
+    rows = conn.execute(
+        """
+        SELECT l.uuid, a.original_filename, a.photos_date, d.keeper_uuid, l.set_id, l.lost_on,
+               act.detail AS stage_detail, f.dest AS archive_dest
+        FROM decision_loser l
+        JOIN dup_set s ON s.id = l.set_id AND s.tier = 'exact'
+        JOIN decision d ON d.set_id = l.set_id AND d.resolvable = 1
+        JOIN asset a ON a.uuid = l.uuid
+        LEFT JOIN apply_action act ON act.uuid = l.uuid AND act.action = 'stage' AND act.status = 'done'
+        LEFT JOIN archive_file f ON f.uuid = l.uuid AND f.kind = 'original'
+        ORDER BY l.uuid
+        """
+    ).fetchall()
+    with open(path, "w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["uuid", "original_filename", "photos_date", "keeper_uuid", "set_id", "lost_on", "album", "archive_dest"])
+        for r in rows:
+            album = json.loads(r["stage_detail"]).get("album") if r["stage_detail"] else ""
+            writer.writerow([r["uuid"], r["original_filename"], r["photos_date"], r["keeper_uuid"], r["set_id"], r["lost_on"], album, r["archive_dest"] or ""])
+    return len(rows)
+
+
+# --- self test -------------------------------------------------------------
+
+
+def self_test(writer: PhotosWriter, uuid: str, *, now: datetime | None = None) -> list[str]:
+    """Prove the write path on one existing photo, then put everything back.
+
+    Creates a throwaway album, adds the photo, sets a marker title and a
+    marker date, reads both back, restores the originals, deletes the album.
+    Raises RuntimeError on the first check that fails, after restoring.
+    """
+    lines: list[str] = []
+    if not writer.exists(uuid):
+        raise RuntimeError(f"photo {uuid} not found in Photos")
+    original = writer.get(uuid)
+    marker_title = f"photodedup self-test {_now(now)}"
+    marker_date = datetime(2003, 2, 23, 9, 8, 8)
+    album_id = None
+    problems: list[str] = []
+    try:
+        album_id = writer.ensure_album(f"photodedup self-test {_now(now)}")
+        added = writer.add_to_album(album_id, [uuid])
+        lines.append(f"album add: {'ok' if added == [uuid] else 'FAILED'}")
+        if added != [uuid]:
+            problems.append("album add did not report the photo")
+        writer.set_title(uuid, marker_title)
+        got = writer.get(uuid).title
+        lines.append(f"title round-trip: {'ok' if got == marker_title else 'FAILED'}")
+        if got != marker_title:
+            problems.append("title did not round-trip")
+        writer.set_date(uuid, marker_date)
+        back = writer.get(uuid).date
+        drift = None if back is None else abs((back - marker_date).total_seconds())
+        lines.append(f"date round-trip: {'ok' if drift == 0 else f'drift of {drift} seconds'} (wrote {marker_date.isoformat()}, read {back.isoformat() if back else None})")
+        if drift != 0:
+            problems.append(f"date drift of {drift} seconds")
+    finally:
+        writer.set_title(uuid, original.title)
+        if original.date is not None:
+            writer.set_date(uuid, original.date)
+        if album_id is not None:
+            writer.delete_album(album_id)
+        lines.append("restored title and date, deleted the test album")
+    if problems:
+        raise RuntimeError("self-test failed: " + "; ".join(problems) + "\n" + "\n".join(lines))
+    return lines

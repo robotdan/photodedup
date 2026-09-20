@@ -7,6 +7,9 @@ from pathlib import Path
 
 import click
 
+from photodedup.apply import (
+    plan_lines, require_archive, run_dates, run_merge, run_stage, self_test, write_losers_csv,
+)
 from photodedup.arbitrate import run_arbitrate
 from photodedup.archive import ArchiveSpace, run_archive
 from photodedup.catalog import (
@@ -19,6 +22,7 @@ from photodedup.catalog import (
 from photodedup.grouping import HashStageIncomplete, run_group
 from photodedup.hash_stage import HashStageInterrupted, run_hash
 from photodedup.library import LibraryUnavailable, iter_assets
+from photodedup.photos_write import PhotosUnavailable, PhotoscriptWriter
 from photodedup.report import duplicate_report, survey_report
 from photodedup.review import write_review
 from photodedup.sets import run_sets
@@ -31,6 +35,13 @@ from photodedup.survey import (
 DEFAULT_LIBRARY = Path.home() / "Pictures" / "Photos Library.photoslibrary"
 DEFAULT_CATALOG = Path("catalog.sqlite")
 DEFAULT_ARCHIVE = Path("/Volumes/Extreme Pro/photodedup")
+
+
+class _NullWriter:
+    """Stands in for Photos on a dry run; every method raises if reached."""
+
+    def __getattr__(self, name: str):
+        raise AssertionError(f"dry run must not call writer.{name}")
 
 
 @click.group()
@@ -274,3 +285,64 @@ def archive(catalog: Path, root: Path, limit: int | None) -> None:
     click.echo(f"archive stage: {status}")
     if status != "complete":
         click.echo("re-run `photodedup archive` once every file copies and verifies clean")
+
+
+@main.command()
+@click.option("--catalog", type=click.Path(path_type=Path), default=DEFAULT_CATALOG, show_default=True)
+@click.option("--merge", "do_merge", is_flag=True, help="Merge loser albums, keywords, favorite and captions onto keepers.")
+@click.option("--dates", "do_dates", is_flag=True, help="Correct keeper capture dates.")
+@click.option("--stage", "do_stage", is_flag=True, help="Put losers in 'Dedup Delete' albums and write losers.csv.")
+@click.option("--all", "do_all", is_flag=True, help="merge, dates, stage in that order.")
+@click.option("--include-disagreeing-dates", is_flag=True, help="Also correct dates in sets flagged dates_disagree (sampled by you).")
+@click.option("--dry-run", is_flag=True, help="Print every action without writing anything.")
+@click.option("--batch", type=int, default=500, show_default=True)
+@click.option("--self-test", "test_uuid", default=None, help="UUID of one existing photo: prove the write path on it and restore it.")
+def apply(catalog: Path, do_merge: bool, do_dates: bool, do_stage: bool, do_all: bool,
+          include_disagreeing_dates: bool, dry_run: bool, batch: int, test_uuid: str | None) -> None:
+    """Apply the decisions to Photos. Never deletes anything. Interactive terminal only."""
+    conn = open_catalog(catalog)
+    if do_all:
+        do_merge = do_dates = do_stage = True
+    if test_uuid:
+        try:
+            for line in self_test(PhotoscriptWriter(), test_uuid):
+                click.echo(line)
+        except (PhotosUnavailable, RuntimeError) as exc:
+            raise click.ClickException(str(exc)) from exc
+        return
+    if not (do_merge or do_dates or do_stage):
+        try:
+            for line in plan_lines(conn, include_disagreeing=include_disagreeing_dates):
+                click.echo(line)
+        except StageIncomplete as exc:
+            raise click.ClickException(str(exc)) from exc
+        return
+    try:
+        require_archive(conn)
+        writer = _NullWriter() if dry_run else PhotoscriptWriter()
+        notes: list[str] = []
+        if do_merge:
+            r = run_merge(conn, writer, dry_run=dry_run)
+            line = f"merge: {r.done} done, {r.failed} failed, {r.skipped} already done"
+            click.echo(line)
+            notes.append(line)
+        if do_dates:
+            r = run_dates(conn, writer, include_disagreeing=include_disagreeing_dates, dry_run=dry_run)
+            line = f"dates: {r.done} done, {r.failed} failed, {r.skipped} already done"
+            click.echo(line)
+            notes.append(line)
+        if do_stage:
+            r = run_stage(conn, writer, batch=batch, dry_run=dry_run)
+            n = write_losers_csv(conn, Path("losers.csv"))
+            line = f"stage: {r.done} done, {r.failed} failed, {r.skipped} already done; losers.csv lists {n}"
+            click.echo(line)
+            notes.append(line)
+        if dry_run:
+            for line in plan_lines(conn, include_disagreeing=include_disagreeing_dates):
+                click.echo(line)
+        elif notes:
+            set_stage(conn, "apply", "complete", notes="; ".join(notes))
+    except StageIncomplete as exc:
+        raise click.ClickException(str(exc)) from exc
+    except PhotosUnavailable as exc:
+        raise click.ClickException(str(exc)) from exc

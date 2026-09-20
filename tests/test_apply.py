@@ -271,3 +271,101 @@ def test_dates_skip_done_rows(dated):
 def test_plan_lines_summarise(dated):
     lines = "\n".join(plan_lines(dated, include_disagreeing=False))
     assert "1 keeper date" in lines and "1 more with --include-disagreeing-dates" in lines
+
+
+from photodedup.apply import BLANK_ALBUM, FOLDER, run_stage, self_test, write_losers_csv
+
+
+@pytest.fixture
+def staged(conn):
+    for i in range(7):
+        add_asset(conn, f"k{i}", size=20); add_asset(conn, f"l{i}", size=10)
+        add_set(conn, i + 1, [f"k{i}", f"l{i}"])
+    # a blank-image set: keeper goes to the blank album, loser is a normal loser
+    add_asset(conn, "bk", size=5); add_asset(conn, "bl", size=5)
+    conn.execute("UPDATE asset_hash SET flat = 1, blank_rows = 1 WHERE uuid IN ('bk', 'bl')")
+    add_set(conn, 8, ["bk", "bl"])
+    run_arbitrate(conn, now=NOW)
+    archived(conn, *[f"l{i}" for i in range(7)], "bl")
+    return conn
+
+
+def test_stage_batches_losers_into_numbered_albums(staged):
+    fake = fake_for(staged)
+    result = run_stage(staged, fake, batch=3, now=NOW)
+    assert (result.done, result.failed, result.skipped) == (9, 0, 0)
+    assert fake.album_members("Dedup Delete 001", FOLDER) == ["bl", "l0", "l1"]
+    assert fake.album_members("Dedup Delete 002", FOLDER) == ["l2", "l3", "l4"]
+    assert fake.album_members("Dedup Delete 003", FOLDER) == ["l5", "l6"]
+    assert fake.album_members(BLANK_ALBUM) == ["bk"]
+    row = staged.execute("SELECT * FROM apply_action WHERE uuid='l2' AND action='stage'").fetchone()
+    assert json.loads(row["detail"]) == {"album": "Dedup Delete 002"}
+    blank = staged.execute("SELECT * FROM apply_action WHERE uuid='bk' AND action='stage_blank'").fetchone()
+    assert json.loads(blank["detail"]) == {"album": BLANK_ALBUM}
+
+
+def test_stage_resumes_without_reshuffling(staged):
+    fake = fake_for(staged)
+    run_stage(staged, fake, batch=3, now=NOW)
+    add_asset(staged, "k9", size=20); add_asset(staged, "l9", size=10)
+    add_set(staged, 9, ["k9", "l9"]); run_arbitrate(staged, now=NOW); archived(staged, "l9")
+    fake.photos["k9"] = fake.photos["l9"] = {"title": "", "description": "", "keywords": [], "favorite": False, "date": None}
+    # arbitrate rewrote decisions but apply_action rows survive; the new loser
+    # lands in the next partial album.
+    result = run_stage(staged, fake, batch=3, now=NOW)
+    assert (result.done, result.skipped) == (1, 9)
+    assert fake.album_members("Dedup Delete 003", FOLDER) == ["l5", "l6", "l9"]
+
+
+def test_stage_never_stages_a_keeper_or_a_candidate(staged):
+    add_asset(staged, "c1", size=10); add_asset(staged, "c2", size=10)
+    add_set(staged, 20, ["c1", "c2"], tier="candidate"); run_arbitrate(staged, now=NOW)
+    fake = fake_for(staged)
+    run_stage(staged, fake, batch=500, now=NOW)
+    everything = sum((fake.album_members(f"Dedup Delete 00{i}", FOLDER) for i in (1, 2, 3)), [])
+    assert not any(u.startswith("k") for u in everything)
+    assert "c1" not in everything and "c2" not in everything
+
+
+def test_stage_failure_is_isolated(staged):
+    fake = FakePhotos({r["uuid"]: {} for r in staged.execute("SELECT uuid FROM asset")}, fail_on={("add_to_album", "l3")})
+    result = run_stage(staged, fake, batch=500, now=NOW)
+    assert result.failed == 1 and result.done == 8
+    assert staged.execute("SELECT status FROM apply_action WHERE uuid='l3'").fetchone()["status"] == "failed"
+
+
+def test_stage_dry_run_creates_nothing(staged):
+    fake = fake_for(staged)
+    run_stage(staged, fake, dry_run=True, now=NOW)
+    assert fake.albums == {}
+
+
+def test_losers_csv(staged, tmp_path):
+    fake = fake_for(staged)
+    run_stage(staged, fake, batch=3, now=NOW)
+    out = tmp_path / "losers.csv"
+    assert write_losers_csv(staged, out) == 8
+    import csv
+    rows = list(csv.DictReader(out.open()))
+    assert rows[0].keys() >= {"uuid", "original_filename", "photos_date", "keeper_uuid", "set_id", "lost_on", "album", "archive_dest"}
+    by_uuid = {r["uuid"]: r for r in rows}
+    assert by_uuid["l2"]["album"] == "Dedup Delete 002" and by_uuid["l2"]["archive_dest"] == "2014/05/l2.jpg"
+
+
+def test_self_test_round_trips_and_restores():
+    fake = FakePhotos({"p": {"title": "Original", "date": datetime(2010, 1, 1, 12, 0, 0)}})
+    lines = self_test(fake, "p", now=NOW)
+    assert any("date round-trip: ok" in line for line in lines)
+    assert fake.get("p").title == "Original"
+    assert fake.get("p").date == datetime(2010, 1, 1, 12, 0, 0)
+    assert fake.albums == {}
+
+
+def test_self_test_reports_a_drifting_date():
+    fake = FakePhotos({"p": {"title": "t", "date": datetime(2010, 1, 1, 12, 0, 0)}})
+    real = fake.set_date
+    fake.set_date = lambda uuid, value: real(uuid, value.replace(hour=value.hour + 1))
+    with pytest.raises(RuntimeError) as exc:
+        self_test(fake, "p", now=NOW)
+    assert "drift" in str(exc.value)
+    assert fake.get("p").title == "t"
