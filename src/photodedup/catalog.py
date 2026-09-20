@@ -159,6 +159,28 @@ CREATE TABLE IF NOT EXISTS decision_loser (
     carries  TEXT NOT NULL,
     PRIMARY KEY (set_id, uuid)
 );
+
+CREATE TABLE IF NOT EXISTS archive_file (
+    uuid        TEXT NOT NULL REFERENCES asset (uuid) ON DELETE CASCADE,
+    kind        TEXT NOT NULL CHECK (kind IN ('original', 'edited', 'live')),
+    dest        TEXT NOT NULL,
+    bytes       INTEGER NOT NULL,
+    sha256      TEXT NOT NULL,
+    verified_at TEXT NOT NULL,
+    PRIMARY KEY (uuid, kind)
+);
+
+CREATE TABLE IF NOT EXISTS apply_action (
+    uuid        TEXT NOT NULL REFERENCES asset (uuid) ON DELETE CASCADE,
+    action      TEXT NOT NULL CHECK (action IN ('merge', 'date', 'stage', 'stage_blank')),
+    status      TEXT NOT NULL CHECK (status IN ('done', 'failed', 'skipped')),
+    detail      TEXT,
+    previous    TEXT,
+    applied_at  TEXT NOT NULL,
+    PRIMARY KEY (uuid, action)
+);
+
+CREATE INDEX IF NOT EXISTS apply_action_action ON apply_action (action, status);
 """
 
 

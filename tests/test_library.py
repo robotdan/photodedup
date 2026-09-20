@@ -117,3 +117,74 @@ def test_iter_records_tolerates_derivative_lookup_failure():
 
     [record] = list(_iter_records(DB()))
     assert record.thumb_path is None
+
+
+def test_stub_is_not_installed_when_photoscript_imports(monkeypatch):
+    """The stub must never hijack a real photoscript. Simulate a working
+    import by planting a module first."""
+    import sys
+    import types
+
+    from photodedup.library import _install_photoscript_stub
+
+    real = types.ModuleType("photoscript")
+    real.PhotosLibrary = object
+    monkeypatch.setitem(sys.modules, "photoscript", real)
+    _install_photoscript_stub()
+    assert sys.modules["photoscript"] is real
+
+
+def test_stub_is_installed_when_photoscript_import_fails(monkeypatch):
+    import builtins
+    import sys
+
+    from photodedup.library import _install_photoscript_stub
+
+    monkeypatch.delitem(sys.modules, "photoscript", raising=False)
+    monkeypatch.delitem(sys.modules, "photoscript.script_loader", raising=False)
+    original_import = builtins.__import__
+
+    def failing(name, *args, **kwargs):
+        if name.startswith("photoscript"):
+            raise RuntimeError("AppleScript compilation failed")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", failing)
+    _install_photoscript_stub()
+    stub = sys.modules["photoscript"]
+    with pytest.raises(RuntimeError):
+        stub.PhotosLibrary()
+
+
+def test_read_states_reports_presence_date_and_albums():
+    from datetime import datetime
+
+    from photodedup.library import AssetState, _read_states_from_db
+
+    class Photo:
+        def __init__(self, uuid, date, albums):
+            self.uuid, self.date, self.albums = uuid, date, albums
+
+    class DB:
+        def get_photo(self, uuid):
+            return {"a": Photo("a", datetime(2014, 5, 12, 17, 0, 0), ["Trips"])}.get(uuid)
+
+    states = _read_states_from_db(DB(), ["a", "gone"])
+    assert states["a"] == AssetState(True, datetime(2014, 5, 12, 17, 0, 0), ("Trips",))
+    assert states["gone"] == AssetState(False, None, ())
+
+
+def test_iter_paths_reads_edited_and_live_paths():
+    from photodedup.library import AssetPaths, _iter_paths_from_db
+
+    class Photo:
+        uuid = "a"
+        path = "/lib/a.jpg"
+        path_edited = "/lib/a_edited.jpg"
+        path_live_photo = None
+
+    class DB:
+        def photos(self, **kwargs):
+            return [Photo()]
+
+    assert list(_iter_paths_from_db(DB())) == [AssetPaths("a", "/lib/a.jpg", "/lib/a_edited.jpg", None)]

@@ -7,7 +7,7 @@ only has to satisfy this interface.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -57,21 +57,29 @@ def _install_photoscript_stub() -> None:
     this module needs.
 
     photoscript is only used for write operations, and Phase 1 performs none, so
-    a stub whose every attribute raises on instantiation is safe. If the real
-    module already imported successfully, leave it alone.
+    a stub whose every attribute raises on instantiation is safe. The real
+    module is tried first; the stub is installed only when that import fails,
+    so a process that can drive Photos keeps the real one.
     """
     import sys
     import types
 
     if "photoscript" in sys.modules:
         return
+    try:
+        import photoscript  # noqa: F401
+        return
+    except Exception:
+        # AppleScript compilation failed: no GUI session. Fall through to the
+        # stub so osxphotos' read-only path still imports.
+        pass
 
     class _Unavailable:
         def __init__(self, *args: object, **kwargs: object) -> None:
             raise RuntimeError(
-                "photoscript is unavailable in this process. Phase 1 is read-only "
-                "and does not need it; a stage that writes to Photos must run "
-                "from an interactive terminal session."
+                "photoscript is unavailable in this process. Read-only stages do "
+                "not need it; a stage that writes to Photos must run from an "
+                "interactive terminal session."
             )
 
     for name in ("photoscript", "photoscript.script_loader"):
@@ -163,3 +171,63 @@ def _iter_records(db: object) -> Iterator[AssetRecord]:
             import_uuid=getattr(photo, "import_uuid", None),
             thumb_path=_thumb_path(photo),
         )
+
+
+@dataclass(frozen=True)
+class AssetState:
+    present: bool
+    date: datetime | None
+    albums: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class AssetPaths:
+    uuid: str
+    path: str | None
+    path_edited: str | None
+    path_live: str | None
+
+
+def _open_db(library_path: Path) -> object:
+    if not Path(library_path).exists():
+        raise LibraryUnavailable(f"Cannot open {library_path}.")
+    _install_photoscript_stub()
+    try:
+        import osxphotos
+    except Exception as exc:  # pragma: no cover - import-time environment failure
+        raise LibraryUnavailable(f"osxphotos could not be imported: {exc}") from exc
+    try:
+        return osxphotos.PhotosDB(str(library_path))
+    except Exception as exc:
+        raise LibraryUnavailable(f"osxphotos could not open {library_path}: {exc}") from exc
+
+
+def _read_states_from_db(db: object, uuids: Iterable[str]) -> dict[str, AssetState]:
+    out: dict[str, AssetState] = {}
+    for uuid in uuids:
+        photo = db.get_photo(uuid)
+        if photo is None:
+            out[uuid] = AssetState(False, None, ())
+        else:
+            out[uuid] = AssetState(True, _naive(photo.date), tuple(photo.albums or ()))
+    return out
+
+
+def read_states(library_path: Path, uuids: Iterable[str]) -> dict[str, AssetState]:
+    """Presence, displayed date and album names for each uuid. Read-only."""
+    return _read_states_from_db(_open_db(library_path), uuids)
+
+
+def _iter_paths_from_db(db: object) -> Iterator[AssetPaths]:
+    for photo in db.photos(movies=True, intrash=False):
+        yield AssetPaths(
+            uuid=photo.uuid,
+            path=photo.path,
+            path_edited=getattr(photo, "path_edited", None),
+            path_live=getattr(photo, "path_live_photo", None),
+        )
+
+
+def iter_paths(library_path: Path) -> Iterator[AssetPaths]:
+    """Original, edited-render and Live Photo movie paths per asset. Read-only."""
+    return _iter_paths_from_db(_open_db(library_path))

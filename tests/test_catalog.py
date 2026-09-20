@@ -222,3 +222,44 @@ def test_asset_hash_has_render_columns(conn):
     )
     row = conn.execute("SELECT blank_rows, flat FROM asset_hash WHERE uuid='u1'").fetchone()
     assert (row["blank_rows"], row["flat"]) == (12, 1)
+
+
+def test_phase4_tables_exist(conn):
+    tables = {
+        row["name"]
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+    assert {"archive_file", "apply_action"} <= tables
+
+
+def test_archive_file_kind_and_cascade(conn):
+    conn.execute("INSERT INTO asset (uuid) VALUES ('u1')")
+    conn.execute(
+        """INSERT INTO archive_file (uuid, kind, dest, bytes, sha256, verified_at)
+           VALUES ('u1', 'original', '2014/05/u1_a.jpg', 10, 'abc', '2026-09-20T00:00:00')"""
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            """INSERT INTO archive_file (uuid, kind, dest, bytes, sha256, verified_at)
+               VALUES ('u1', 'thumbnail', 'x', 1, 'a', 'now')"""
+        )
+    conn.execute("DELETE FROM asset WHERE uuid = 'u1'")
+    assert conn.execute("SELECT COUNT(*) AS n FROM archive_file").fetchone()["n"] == 0
+
+
+def test_apply_action_constraints(conn):
+    conn.execute("INSERT INTO asset (uuid) VALUES ('u1')")
+    conn.execute(
+        """INSERT INTO apply_action (uuid, action, status, detail, previous, applied_at)
+           VALUES ('u1', 'merge', 'done', '{}', '{}', 'now')"""
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            """INSERT INTO apply_action (uuid, action, status, applied_at)
+               VALUES ('u1', 'delete', 'done', 'now')"""
+        )
+    assert conn.execute("SELECT COUNT(*) AS n FROM apply_action").fetchone()["n"] == 1
+
+
+def test_schema_version_is_still_4():
+    assert SCHEMA_VERSION == 4
