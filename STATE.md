@@ -501,6 +501,13 @@ all added within two minutes on 2025-03-12, is unexplained. It is NOT in
 
 ## Domain decisions
 
+- 2026-09-20, from the user, after sampling the review report: a copy that
+  carries Photos edits (a crop, a colour adjustment) is a distinct
+  photograph and is never a loser, whatever its ranking. `split_protected`
+  in `arbitrate.py` enforces it; such sets carry the informational flag
+  `kept_edits` (8 sets on this library) and the report shows the member as
+  "KEEP (edited)". The favorite flag was already safe: a favorite wins the
+  keeper slot, and a favorite loser is recorded in `carries` for Phase 4.
 - 2026-09-18, from the user: no photo in this library has a legitimate capture
   date of 1970-01-01 or 1980-01-01. Any candidate landing on those dates is a
   software default and is wrong. The sentinel rejection rule in `dates.py`
