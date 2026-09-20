@@ -286,7 +286,9 @@ def staged(conn):
     conn.execute("UPDATE asset_hash SET flat = 1, blank_rows = 1 WHERE uuid IN ('bk', 'bl')")
     add_set(conn, 8, ["bk", "bl"])
     run_arbitrate(conn, now=NOW)
-    archived(conn, *[f"l{i}" for i in range(7)], "bl")
+    # 'bk' is the blank-image keeper: it goes into 'Dedup Delete blank' for
+    # the user to delete, so require_archive wants it archived like a loser.
+    archived(conn, *[f"l{i}" for i in range(7)], "bl", "bk")
     return conn
 
 
@@ -328,10 +330,47 @@ def test_stage_never_stages_a_keeper_or_a_candidate(staged):
 
 
 def test_stage_failure_is_isolated(staged):
+    """Losers go in one add per album, so a failure costs that album's batch
+    and nothing else. The batch holding 'l3' is 'Dedup Delete 002'; 001 and
+    003 still go in, and the next run retries only the three that failed."""
     fake = FakePhotos({r["uuid"]: {} for r in staged.execute("SELECT uuid FROM asset")}, fail_on={("add_to_album", "l3")})
-    result = run_stage(staged, fake, batch=500, now=NOW)
-    assert result.failed == 1 and result.done == 8
-    assert staged.execute("SELECT status FROM apply_action WHERE uuid='l3'").fetchone()["status"] == "failed"
+    result = run_stage(staged, fake, batch=3, now=NOW)
+    # 5 losers in the two surviving albums, plus the blank keeper
+    assert (result.done, result.failed) == (6, 3)
+    statuses = {
+        r["uuid"]: r["status"]
+        for r in staged.execute("SELECT uuid, status FROM apply_action WHERE action = 'stage'")
+    }
+    assert sorted(u for u, st in statuses.items() if st == "failed") == ["l2", "l3", "l4"]
+    assert fake.album_members("Dedup Delete 001", FOLDER) == ["bl", "l0", "l1"]
+    assert fake.album_members("Dedup Delete 003", FOLDER) == ["l5", "l6"]
+
+    fake.fail_on = set()
+    fake.calls.clear()
+    second = run_stage(staged, fake, batch=3, now=NOW)
+    assert (second.done, second.failed, second.skipped) == (3, 0, 6)
+    assert [u for op, u in fake.calls if op == "add_to_album"] == ["l2", "l3", "l4"]
+
+
+def test_stage_adds_each_album_in_one_call(staged):
+    """One AppleScript round trip per album, not per photo: 16,854 losers is
+    34 calls, not 16,854."""
+    calls: list[tuple[str, list[str]]] = []
+    fake = fake_for(staged)
+    real = fake.add_to_album
+
+    def record(album_id, uuids):
+        calls.append((fake.album_name(album_id), list(uuids)))
+        return real(album_id, uuids)
+
+    fake.add_to_album = record
+    run_stage(staged, fake, batch=3, now=NOW)
+    assert calls == [
+        ("Dedup Delete 001", ["bl", "l0", "l1"]),
+        ("Dedup Delete 002", ["l2", "l3", "l4"]),
+        ("Dedup Delete 003", ["l5", "l6"]),
+        (BLANK_ALBUM, ["bk"]),
+    ]
 
 
 def test_stage_dry_run_creates_nothing(staged):
@@ -370,9 +409,55 @@ def test_losers_csv(staged, tmp_path):
     assert by_uuid["l2"]["album"] == "Dedup Delete 002" and by_uuid["l2"]["archive_dest"] == "2014/05/l2.jpg"
 
 
+def test_merge_records_previous_before_the_first_write(merged):
+    """A crash between the first write and the last must not leave the keeper
+    changed with nothing on record: `previous` is the only undo there is."""
+    fake = fake_for(merged)
+
+    def interrupt(uuid, values):
+        raise KeyboardInterrupt("user pressed ctrl-c mid-merge")
+
+    fake.set_keywords = interrupt
+    with pytest.raises(KeyboardInterrupt):
+        run_merge(merged, fake, now=NOW)
+
+    # the album add already happened; the row proves what 'k' looked like first
+    assert fake.album_members("B") == ["k"]
+    row = merged.execute("SELECT * FROM apply_action WHERE uuid='k' AND action='merge'").fetchone()
+    assert row["status"] == "failed"
+    assert json.loads(row["detail"]) == {"in_progress": True}
+    assert json.loads(row["previous"]) == {
+        "title": "", "description": "", "keywords": ["x"], "favorite": False, "albums": [],
+    }
+
+
+def test_dates_record_the_old_date_before_writing_the_new_one(dated):
+    fake = fake_for(dated)
+
+    def interrupt(uuid, value):
+        raise KeyboardInterrupt("user pressed ctrl-c mid-write")
+
+    fake.set_date = interrupt
+    with pytest.raises(KeyboardInterrupt):
+        run_dates(dated, fake, now=NOW)
+    row = dated.execute("SELECT * FROM apply_action WHERE uuid='k1' AND action='date'").fetchone()
+    assert row["status"] == "failed"
+    assert json.loads(row["previous"]) == {"date": "2020-12-18T09:10:00"}
+
+
+def test_require_archive_names_the_photos_it_is_missing(conn):
+    add_asset(conn, "k", size=20); add_asset(conn, "l", size=10)
+    add_set(conn, 1, ["k", "l"]); run_arbitrate(conn, now=NOW)
+    with pytest.raises(StageIncomplete) as exc:
+        require_archive(conn)
+    assert "l.jpg (l)" in str(exc.value)
+
+
 def test_self_test_round_trips_and_restores():
     fake = FakePhotos({"p": {"title": "Original", "date": datetime(2010, 1, 1, 12, 0, 0)}})
     lines = self_test(fake, "p", now=NOW)
+    assert lines[0] == "original title: 'Original'"
+    assert lines[1] == "original date: 2010-01-01T12:00:00"
     assert any("date round-trip: ok" in line for line in lines)
     assert fake.get("p").title == "Original"
     assert fake.get("p").date == datetime(2010, 1, 1, 12, 0, 0)
@@ -387,6 +472,27 @@ def test_self_test_reports_a_drifting_date():
         self_test(fake, "p", now=NOW)
     assert "drift" in str(exc.value)
     assert fake.get("p").title == "t"
+
+
+def test_self_test_restores_date_and_album_even_when_the_title_restore_fails():
+    """One failed restore must not skip the others; the photo keeps the marker
+    date and the test album otherwise."""
+    fake = FakePhotos({"p": {"title": "Original", "date": datetime(2010, 1, 1, 12, 0, 0)}})
+    calls = {"n": 0}
+    real = fake.set_title
+
+    def fail_on_restore(uuid, value):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("AppleScript timed out")
+        real(uuid, value)
+
+    fake.set_title = fail_on_restore
+    with pytest.raises(RuntimeError) as exc:
+        self_test(fake, "p", now=NOW)
+    assert "could not restore title" in str(exc.value)
+    assert fake.get("p").date == datetime(2010, 1, 1, 12, 0, 0)
+    assert fake.albums == {}
 
 
 def test_self_test_refuses_a_photo_with_no_capture_date_before_touching_it():

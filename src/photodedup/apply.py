@@ -41,31 +41,54 @@ def _now(now: datetime | None) -> str:
     return (now or datetime.now()).replace(microsecond=0).isoformat()
 
 
+MISSING_LISTED = 20
+
+
 def require_archive(conn: Connection) -> None:
-    """Every pending loser must have a verified archived original, and the
-    archive stage itself must be complete.
+    """Everything staging will touch must have a verified archived original,
+    and the archive stage itself must be complete.
 
     The two checks catch different half-finished states: the count catches a
-    resolvable loser with no archived original at all; the stage check
-    catches a loser whose original copied but whose edited or live render
-    did not, which the count alone (it only looks at `kind='original'`)
-    would miss while the archive stage sits at 'running'.
+    photo with no archived original at all; the stage check catches one whose
+    original copied but whose edited or live render did not, which the count
+    alone (it only looks at `kind='original'`) would miss while the archive
+    stage sits at 'running'.
+
+    "Everything" is the losers plus the keepers of blank-image sets: those
+    keepers go into `Dedup Delete blank` for the user to delete, so they need
+    the same archived fallback a loser gets.
     """
     missing = conn.execute(
         """
-        SELECT COUNT(*) AS n
-        FROM decision_loser l
-        JOIN dup_set s ON s.id = l.set_id AND s.tier = 'exact'
-        JOIN decision d ON d.set_id = l.set_id AND d.resolvable = 1
+        SELECT t.uuid AS uuid, t.original_filename AS original_filename FROM (
+            SELECT l.uuid AS uuid, a.original_filename AS original_filename
+            FROM decision_loser l
+            JOIN dup_set s ON s.id = l.set_id AND s.tier = 'exact'
+            JOIN decision d ON d.set_id = l.set_id AND d.resolvable = 1
+            JOIN asset a ON a.uuid = l.uuid
+            UNION
+            SELECT d.keeper_uuid, a.original_filename
+            FROM decision d
+            JOIN dup_set s ON s.id = d.set_id AND s.tier = 'exact'
+            JOIN asset a ON a.uuid = d.keeper_uuid
+            WHERE ',' || d.review_flags || ',' LIKE '%,blank_image,%'
+        ) t
         WHERE NOT EXISTS (
-            SELECT 1 FROM archive_file f WHERE f.uuid = l.uuid AND f.kind = 'original'
+            SELECT 1 FROM archive_file f WHERE f.uuid = t.uuid AND f.kind = 'original'
         )
+        ORDER BY t.uuid
         """
-    ).fetchone()["n"]
+    ).fetchall()
     if missing:
+        listed = ", ".join(
+            f"{r['original_filename'] or '?'} ({r['uuid']})" for r in missing[:MISSING_LISTED]
+        )
+        more = len(missing) - MISSING_LISTED
         raise StageIncomplete(
-            f"{missing} losers have no verified archive copy. Run `photodedup archive` "
-            "until it reports 0 mismatched and 0 missing."
+            f"{len(missing)} photo{'s' if len(missing) != 1 else ''} staged for deletion "
+            f"{'have' if len(missing) != 1 else 'has'} no verified archive copy. "
+            "Run `photodedup archive` until it reports 0 mismatched and 0 missing. "
+            f"Missing: {listed}" + (f" and {more} more." if more > 0 else ".")
         )
     require_stage_complete(conn, "archive")
 
@@ -170,6 +193,11 @@ def run_merge(conn: Connection, writer: PhotosWriter, *, dry_run: bool = False, 
             "albums": list(state.albums),
         }
         written: dict = {}
+        # Persist the pre-write state BEFORE the first write. A crash, a
+        # Ctrl-C or a Photos hang between here and the last write would
+        # otherwise leave the keeper changed with no record of what it was,
+        # and `previous` is the only undo this tool has.
+        _record(conn, keeper, "merge", "failed", {"in_progress": True}, previous, now)
         try:
             albums = [a for a in carry["albums"] if a not in state.albums]
             for album in albums:
@@ -236,6 +264,9 @@ def run_dates(conn: Connection, writer: PhotosWriter, *, include_disagreeing: bo
         try:
             before = writer.get(target.keeper).date
             previous = {"date": before.isoformat() if before else None}
+            # The old date goes on record before the new one is written; see
+            # run_merge for why.
+            _record(conn, target.keeper, "date", "failed", {"in_progress": True}, previous, now)
             writer.set_date(target.keeper, target.value)
             after = writer.get(target.keeper).date
             if after is not None and abs((after - target.value).total_seconds()) <= 1:
@@ -332,29 +363,47 @@ def run_stage(conn: Connection, writer: PhotosWriter, *, batch: int = BATCH, dry
     for name in counts:
         try:
             indices.append(int(name.rsplit(" ", 1)[1]))
-        except ValueError:
+        except (ValueError, IndexError):
             continue
     index = max(indices or [1])
     while counts.get(_album_name(index), 0) >= batch:
         index += 1
 
+    # Work out every album assignment first, then add each album's photos in
+    # ONE call. Photos takes about as long to add 500 photos as one, and a
+    # per-photo call is 16,854 AppleScript round trips.
+    pending: list[str] = []
     for uuid in losers:
         if uuid in done_stage:
             skipped += 1
             continue
-        if dry_run:
-            continue
-        while counts.get(_album_name(index), 0) >= batch:
-            index += 1
-        name = _album_name(index)
-        try:
-            writer.add_to_album(writer.ensure_album(name, folder=FOLDER), [uuid])
-            _record(conn, uuid, "stage", "done", {"album": name}, None, now)
+        pending.append(uuid)
+
+    if not dry_run:
+        batches: list[tuple[str, list[str]]] = []
+        for uuid in pending:
+            while counts.get(_album_name(index), 0) >= batch:
+                index += 1
+            name = _album_name(index)
+            if batches and batches[-1][0] == name:
+                batches[-1][1].append(uuid)
+            else:
+                batches.append((name, [uuid]))
             counts[name] = counts.get(name, 0) + 1
-            done += 1
-        except Exception as exc:
-            _record(conn, uuid, "stage", "failed", {"error": str(exc), "album": name}, None, now)
-            failed += 1
+
+        for name, uuids in batches:
+            try:
+                writer.add_to_album(writer.ensure_album(name, folder=FOLDER), uuids)
+            except Exception as exc:
+                # One album's add failed; the whole batch is unrecorded and
+                # retried next run. The remaining albums still go in.
+                for uuid in uuids:
+                    _record(conn, uuid, "stage", "failed", {"error": str(exc), "album": name}, None, now)
+                failed += len(uuids)
+                continue
+            for uuid in uuids:
+                _record(conn, uuid, "stage", "done", {"album": name}, None, now)
+            done += len(uuids)
 
     for uuid in blank_keepers:
         if uuid in done_blank:
@@ -413,6 +462,11 @@ def self_test(writer: PhotosWriter, uuid: str, *, now: datetime | None = None) -
     original = writer.get(uuid)
     if original.date is None:
         raise RuntimeError("photo has no capture date; pick another photo for the self-test")
+    # Print what is about to be changed before anything is changed: if the
+    # restore at the end fails, these two lines are how the user puts the
+    # photo back by hand.
+    lines.append(f"original title: {original.title!r}")
+    lines.append(f"original date: {original.date.isoformat()}")
     marker_title = f"photodedup self-test {_now(now)}"
     marker_date = datetime(2003, 2, 23, 9, 8, 8)
     album_id = None
@@ -435,12 +489,24 @@ def self_test(writer: PhotosWriter, uuid: str, *, now: datetime | None = None) -
         if drift != 0:
             problems.append(f"date drift of {drift} seconds")
     finally:
-        writer.set_title(uuid, original.title)
-        if original.date is not None:
-            writer.set_date(uuid, original.date)
-        if album_id is not None:
-            writer.delete_album(album_id)
-        lines.append("restored title and date, deleted the test album")
+        # Each restore stands alone: a failure putting the title back must
+        # not leave the marker date on the photo or the test album in the
+        # library, which is what one shared try/except would do.
+        restored = []
+        for what, action in (
+            ("title", lambda: writer.set_title(uuid, original.title)),
+            ("date", lambda: writer.set_date(uuid, original.date)),
+            ("album", lambda: writer.delete_album(album_id)),
+        ):
+            if what == "album" and album_id is None:
+                continue
+            try:
+                action()
+                restored.append(what)
+            except Exception as exc:
+                problems.append(f"could not restore {what}: {exc}")
+                lines.append(f"RESTORE FAILED for {what}: {exc}")
+        lines.append("restored: " + (", ".join(restored) if restored else "nothing"))
     if problems:
         raise RuntimeError("self-test failed: " + "; ".join(problems) + "\n" + "\n".join(lines))
     return lines

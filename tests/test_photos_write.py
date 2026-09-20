@@ -80,10 +80,14 @@ def test_photoscript_writer_drives_the_real_api_shapes(monkeypatch):
     - Folder.album(name) (line 987) is a method returning Album | None;
       Folder.create_album(name) (line 1010) is a method.
     - Album.id (set as a plain attribute in __init__, line ~618) is not a
-      property; Album.photos (line 682) is a METHOD, not a property -- this
-      is the exact shape that caught the `album.photos` vs `album.photos()`
-      bug; Album.add (line 687) is a method returning the added Photo
-      objects; Album.name (line 629 @property / 630 def) is a property.
+      property; Album.photos (line 682) is a METHOD, not a property -- kept
+      on the stand-in for shape fidelity even though the writer no longer
+      enumerates an album; Album.add (line 687) is a method taking Photo
+      objects and returning the added Photo objects; Album.name (line 629
+      @property / 630 def) is a property.
+    - PhotosLibrary.album's top_level defaults to False (line 289), so the
+      writer's unfiltered lookup finds an album the user filed in a folder
+      instead of creating a second one with the same name.
     - Photo(uuid) raises ValueError for an unknown uuid (line 1044); .title
       (1065/1070), .description (1076/1082), .keywords (1088/1096),
       .favorite (1102/1107) and .date (1163/1168) are properties with
@@ -101,6 +105,8 @@ def test_photoscript_writer_drives_the_real_api_shapes(monkeypatch):
     }
     albums: dict[str, dict] = {}   # id -> {"name", "folder" (folder id or None), "members": [uuid,...]}
     folders: dict[str, dict] = {}  # id -> {"name"}
+    add_calls: list[list] = []
+    enumerated: list[str] = []
 
     class Photo:
         def __init__(self, uuid):
@@ -163,11 +169,15 @@ def test_photoscript_writer_drives_the_real_api_shapes(monkeypatch):
             return albums[self.id]["name"]
 
         def photos(self):
+            enumerated.append(self.id)
             return [Photo(uuid) for uuid in albums[self.id]["members"]]
 
         def add(self, photos_to_add):
+            add_calls.append(list(photos_to_add))
             added = []
             for p in photos_to_add:
+                if not isinstance(p, Photo):
+                    raise TypeError(f"Album.add takes Photo objects, got {p!r}")
                 if p.uuid not in albums[self.id]["members"]:
                     albums[self.id]["members"].append(p.uuid)
                     photos[p.uuid]["albums"].append(self.id)
@@ -228,7 +238,12 @@ def test_photoscript_writer_drives_the_real_api_shapes(monkeypatch):
 
     album_id = writer.ensure_album("T", folder="F")
     assert writer.add_to_album(album_id, ["a"]) == ["a"]
+    # Photos albums are sets: re-adding is a no-op there and reports nothing
+    # added, so the writer never has to enumerate the album to find out.
     assert writer.add_to_album(album_id, ["a"]) == []
+    assert [[p.uuid for p in call] for call in add_calls] == [["a"], ["a"]]
+    assert all(isinstance(p, Photo) for call in add_calls for p in call)
+    assert enumerated == []
 
     writer.set_title("a", "Beach")
     writer.set_description("a", "sand")
@@ -246,3 +261,40 @@ def test_photoscript_writer_drives_the_real_api_shapes(monkeypatch):
 
     writer.delete_album(album_id)
     assert album_id not in albums
+
+
+def test_ensure_album_finds_a_top_level_name_that_lives_in_a_folder(monkeypatch):
+    """`self._lib.album(name)` must not filter on top_level: an album the user
+    has filed inside a folder still answers to its name, and creating a second
+    one would split the staging across two albums."""
+    import sys
+    import types
+
+    albums: dict[str, dict] = {"album-1": {"name": "Dedup Delete blank", "folder": "folder-1"}}
+    created: list[str] = []
+
+    class Album:
+        def __init__(self, album_id):
+            self.id = album_id
+
+    class PhotosLibrary:
+        def album(self, name, top_level=False):
+            assert top_level is False, "the lookup must not filter to top level"
+            for album_id, a in albums.items():
+                if a["name"] == name:
+                    return Album(album_id)
+            return None
+
+        def create_album(self, name):
+            created.append(name)
+            albums[f"album-{len(albums) + 1}"] = {"name": name, "folder": None}
+            return Album(f"album-{len(albums)}")
+
+    stub = types.ModuleType("photoscript")
+    stub.PhotosLibrary = PhotosLibrary
+    stub.Album = Album
+    monkeypatch.setitem(sys.modules, "photoscript", stub)
+
+    writer = PhotoscriptWriter()
+    assert writer.ensure_album("Dedup Delete blank") == "album-1"
+    assert created == []

@@ -11,7 +11,7 @@ from photodedup.apply import (
     plan_lines, require_archive, run_dates, run_merge, run_stage, self_test, write_losers_csv,
 )
 from photodedup.arbitrate import run_arbitrate
-from photodedup.archive import ArchiveSpace, run_archive
+from photodedup.archive import ArchiveDestination, ArchiveSpace, run_archive
 from photodedup.catalog import (
     StageIncomplete,
     get_stage,
@@ -275,7 +275,7 @@ def archive(catalog: Path, root: Path, limit: int | None) -> None:
             conn, root, limit=limit,
             progress=lambda done, total: click.echo(f"  {done}/{total}", err=True),
         )
-    except (StageIncomplete, ArchiveSpace, LibraryUnavailable) as exc:
+    except (StageIncomplete, ArchiveSpace, ArchiveDestination, LibraryUnavailable) as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(
         f"{result.copied} copied ({result.bytes} bytes), {result.skipped} already archived, "
@@ -371,7 +371,8 @@ def verify(catalog: Path, out: Path) -> None:
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(verify_report(result))
     click.echo(
-        f"wrote {out}: {len(result.losers_present)} losers still present, {len(result.losers_gone)} gone, "
+        f"wrote {out}: {len(result.losers_present)} losers still present, "
+        f"{len(result.losers_trashed)} in Recently Deleted, {len(result.losers_gone)} gone, "
         f"{len(result.keepers_missing)} keepers missing, {len(result.dates_wrong)} dates wrong, "
         f"{len(result.stale_staged)} staged photos no longer losers"
     )

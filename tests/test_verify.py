@@ -58,6 +58,20 @@ def test_after_deletion_and_a_bad_date(applied):
     assert r.merges_missing == [("k", "B")]
 
 
+def test_a_trashed_loser_counts_as_trashed_not_present_and_not_gone(applied):
+    """After the user deletes a delete album, its losers sit in Recently
+    Deleted for 30 days. Reporting them as still present would read as a
+    failed deletion; reporting them as gone would overstate it."""
+    states = {
+        "k": AssetState(True, datetime(2014, 5, 12, 17, 0, 0), ("A", "B"), False),
+        "l": AssetState(False, datetime(2014, 5, 12, 17, 0, 0), ("Dedup Delete 001",), True),
+    }
+    r = run_verify(applied, states=states)
+    assert r.losers_trashed == ["l"]
+    assert r.losers_present == [] and r.losers_gone == []
+    assert "Recently Deleted (recoverable for 30 days): 1" in verify_report(r)
+
+
 def test_missing_keeper_is_reported(applied):
     states = {"k": AssetState(False, None, ()), "l": AssetState(True, None, ())}
     r = run_verify(applied, states=states)

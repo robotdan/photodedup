@@ -6,7 +6,14 @@ from pathlib import Path
 
 import pytest
 
-from photodedup.archive import ArchiveSpace, dest_for, pending_losers, run_archive
+from photodedup.archive import (
+    ArchiveDestination,
+    ArchiveSpace,
+    dest_for,
+    pending_archive,
+    pending_losers,
+    run_archive,
+)
 from photodedup.arbitrate import run_arbitrate
 from photodedup.catalog import StageIncomplete, get_stage, open_catalog, set_stage
 from photodedup.library import AssetPaths
@@ -199,6 +206,120 @@ def test_refuses_when_the_volume_is_not_mounted(decided, tmp_path, monkeypatch):
 
     with pytest.raises(ArchiveSpace):
         run_archive(decided, fake_volume / "x", free_bytes=lambda p: 10**9)
+
+
+@pytest.fixture
+def blank(conn, tmp_path):
+    """A blank-image set: the KEEPER goes to 'Dedup Delete blank' for the user
+    to delete, so it needs archiving exactly like a loser."""
+    add_asset(conn, "a", tmp_path, size=20)
+    add_asset(conn, "b", tmp_path, size=10, photos_date="2003-02-23T09:08:08")
+    conn.execute("UPDATE asset_hash SET flat = 1, blank_rows = 1 WHERE uuid IN ('a', 'b')")
+    add_set(conn, 1, ["a", "b"])
+    run_arbitrate(conn, now=NOW)
+    assert "blank_image" in conn.execute("SELECT review_flags FROM decision").fetchone()["review_flags"]
+    return conn
+
+
+def test_pending_archive_covers_blank_keepers_as_well_as_losers(blank):
+    roles = {r["uuid"]: r["role"] for r in pending_archive(blank)}
+    assert roles == {"a": "blank_keeper", "b": "loser"}
+    assert [r["uuid"] for r in pending_losers(blank)] == ["b"]
+
+
+def test_blank_keeper_is_archived_with_its_own_sidecar_role(blank, tmp_path):
+    root = tmp_path / "archive"
+    result = run_archive(blank, root, free_bytes=lambda p: 10**9)
+    assert result.copied == 2
+    kept = json.loads((root / "2014" / "05" / "a_a.jpg.json").read_text())
+    assert kept["role"] == "blank_keeper"
+    assert kept["lost_on"] is None and kept["carries"] == {}
+    lost = json.loads((root / "2003" / "02" / "b_b.jpg.json").read_text())
+    assert lost["role"] == "loser"
+
+
+def test_apply_refuses_while_a_blank_keeper_is_unarchived(blank, tmp_path):
+    from photodedup.apply import require_archive
+    from photodedup.catalog import set_stage as _set_stage
+
+    run_archive(blank, tmp_path / "archive", free_bytes=lambda p: 10**9)
+    blank.execute("DELETE FROM archive_file WHERE uuid = 'a'")
+    _set_stage(blank, "archive", "complete")
+    blank.commit()
+    with pytest.raises(StageIncomplete) as exc:
+        require_archive(blank)
+    assert "a.jpg (a)" in str(exc.value)
+
+
+def test_a_destination_error_stops_the_run_and_keeps_what_is_verified(decided, tmp_path, monkeypatch):
+    """A source we cannot read is one file to retry; a destination we cannot
+    write is the drive going away, and every later copy would fail the same
+    way. They must not be reported as the same thing."""
+    import photodedup.archive as arc
+
+    def boom(src, dst):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(arc, "_copy_hashing", boom)
+    root = tmp_path / "archive"
+    with pytest.raises(ArchiveDestination) as exc:
+        run_archive(decided, root, free_bytes=lambda p: 10**9)
+    message = str(exc.value)
+    assert "destination error at" in message and "No space left" in message
+    assert "everything verified so far is kept" in message
+    assert not list(root.rglob("*.part"))
+    assert decided.execute("SELECT COUNT(*) AS n FROM archive_file").fetchone()["n"] == 0
+    stage = get_stage(decided, "archive")
+    assert stage["status"] == "running" and "destination error" in stage["notes"]
+
+
+def test_missing_sources_are_listed_in_the_stage_note(decided, tmp_path):
+    Path(decided.execute("SELECT path FROM asset WHERE uuid='b'").fetchone()["path"]).unlink()
+    run_archive(decided, tmp_path / "archive", free_bytes=lambda p: 10**9)
+    notes = get_stage(decided, "archive")["notes"]
+    assert "missing sources: b" in notes
+
+
+def test_the_library_is_never_opened_when_nothing_has_an_edit_or_a_live_movie(decided, tmp_path, monkeypatch):
+    """Opening osxphotos reads the whole library. The path map only matters for
+    assets with an edited render or a Live Photo movie, so with none pending
+    the open must not happen at all."""
+    import photodedup.archive as arc
+
+    decided.execute(
+        "INSERT INTO run (id, library_path, cutoff_date_added, created_at) "
+        "VALUES (1, '/nope.photoslibrary', '2026-01-01T00:00:00', 'now')"
+    )
+    decided.commit()
+
+    def never(path):
+        raise AssertionError(f"iter_paths must not be called; got {path}")
+
+    monkeypatch.setattr(arc, "iter_paths", never)
+    result = run_archive(decided, tmp_path / "archive", free_bytes=lambda p: 10**9)
+    assert result.copied == 1
+
+
+def test_the_library_is_opened_when_a_pending_loser_has_an_edit(decided, tmp_path, monkeypatch):
+    import photodedup.archive as arc
+    from photodedup.library import AssetPaths
+
+    decided.execute("UPDATE asset SET has_adjustments = 1 WHERE uuid = 'b'")
+    decided.execute(
+        "INSERT INTO run (id, library_path, cutoff_date_added, created_at) "
+        "VALUES (1, '/nope.photoslibrary', '2026-01-01T00:00:00', 'now')"
+    )
+    decided.commit()
+    edited = tmp_path / "lib" / "b_edited.jpg"; edited.write_bytes(b"E" * 5)
+    called = []
+
+    def fake_iter_paths(path):
+        called.append(path)
+        return iter([AssetPaths("b", str(tmp_path / "lib" / "b.jpg"), str(edited), None)])
+
+    monkeypatch.setattr(arc, "iter_paths", fake_iter_paths)
+    result = run_archive(decided, tmp_path / "archive", free_bytes=lambda p: 10**9)
+    assert called and result.copied == 2
 
 
 def test_limited_run_leaves_the_stage_running(conn, tmp_path):

@@ -100,7 +100,11 @@ class PhotoscriptWriter:
         if key in self._albums:
             return self._albums[key]
         if folder is None:
-            album = self._lib.album(name, top_level=True)
+            # No top_level filter on the lookup: an album of this name may
+            # already live inside a folder (the user filed it there), and
+            # creating a second one with the same name would split the
+            # staging across two albums. Creation stays top level.
+            album = self._lib.album(name)
             if album is None:
                 album = self._lib.create_album(name)
         else:
@@ -112,13 +116,20 @@ class PhotoscriptWriter:
         return album.id
 
     def add_to_album(self, album_id: str, uuids: list[str]) -> list[str]:
+        """Add *uuids* to the album, returning what Photos says it added.
+
+        The album is never enumerated first. A Photos album is a set, so
+        re-adding a photo it already holds is a no-op there, and every
+        caller already knows the membership it cares about (merge reads it
+        from `state.albums`, staging from its own `apply_action` rows).
+        Enumerating instead costs one AppleScript round trip per album over
+        an album that can hold 500 photos.
+        """
         album = self._ps.Album(album_id)
-        already = {p.uuid for p in album.photos()}
-        todo = [self._photo(u) for u in uuids if u not in already]
-        if not todo:
+        photos = [self._photo(u) for u in uuids]
+        if not photos:
             return []
-        added = album.add(todo)
-        return [p.uuid for p in added]
+        return [p.uuid for p in album.add(photos) or ()]
 
     def delete_album(self, album_id: str) -> None:
         self._lib.delete_album(self._ps.Album(album_id))

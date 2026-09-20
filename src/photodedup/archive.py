@@ -24,6 +24,15 @@ class ArchiveSpace(RuntimeError):
     """The destination volume cannot hold what remains to be copied."""
 
 
+class ArchiveDestination(RuntimeError):
+    """Writing to or reading back from the archive root failed.
+
+    Distinct from a missing source: a source we cannot read is one file to
+    retry next run, while a destination we cannot write is the drive going
+    away underneath us, and every subsequent copy would fail the same way.
+    """
+
+
 @dataclass(frozen=True)
 class ArchiveResult:
     copied: int
@@ -33,21 +42,53 @@ class ArchiveResult:
     bytes: int
 
 
+_PENDING_SQL = """
+    SELECT a.uuid, a.original_filename, a.path, a.file_size, a.photos_date,
+           a.date_added, a.albums, a.keywords, a.is_favorite, a.title,
+           a.description, a.has_adjustments, a.is_live,
+           l.set_id, l.lost_on, l.carries,
+           d.keeper_uuid, d.date_value, d.review_flags, 'loser' AS role
+    FROM decision_loser l
+    JOIN dup_set s ON s.id = l.set_id AND s.tier = 'exact'
+    JOIN decision d ON d.set_id = l.set_id AND d.resolvable = 1
+    JOIN asset a ON a.uuid = l.uuid
+    UNION ALL
+    SELECT a.uuid, a.original_filename, a.path, a.file_size, a.photos_date,
+           a.date_added, a.albums, a.keywords, a.is_favorite, a.title,
+           a.description, a.has_adjustments, a.is_live,
+           d.set_id, NULL, NULL,
+           d.keeper_uuid, d.date_value, d.review_flags, 'blank_keeper' AS role
+    FROM decision d
+    JOIN dup_set s ON s.id = d.set_id AND s.tier = 'exact'
+    JOIN asset a ON a.uuid = d.keeper_uuid
+    WHERE ',' || d.review_flags || ',' LIKE '%,blank_image,%'
+    ORDER BY uuid
+"""
+
+
+def pending_archive(conn: Connection) -> list[Row]:
+    """Everything `apply` will stage for deletion, with the sidecar fields.
+
+    Two populations, not one: the losers of resolvable exact sets, and the
+    KEEPERS of blank-image sets, which `apply --stage` puts in the separate
+    `Dedup Delete blank` album. Both end up in a delete album, so both need
+    an archived copy before `apply` is allowed to run.
+    """
+    seen: set[str] = set()
+    rows: list[Row] = []
+    for row in conn.execute(_PENDING_SQL):
+        # A blank-image keeper could in principle also be a loser elsewhere.
+        # One archived original per uuid, or the insert would collide.
+        if row["uuid"] in seen:
+            continue
+        seen.add(row["uuid"])
+        rows.append(row)
+    return rows
+
+
 def pending_losers(conn: Connection) -> list[Row]:
-    """Losers of resolvable exact sets, with everything the sidecar needs."""
-    return conn.execute(
-        """
-        SELECT a.uuid, a.original_filename, a.path, a.file_size, a.photos_date,
-               a.date_added, a.albums, a.keywords, a.is_favorite, a.title,
-               a.description, l.set_id, l.lost_on, l.carries,
-               d.keeper_uuid, d.date_value, d.review_flags
-        FROM decision_loser l
-        JOIN dup_set s ON s.id = l.set_id AND s.tier = 'exact'
-        JOIN decision d ON d.set_id = l.set_id AND d.resolvable = 1
-        JOIN asset a ON a.uuid = l.uuid
-        ORDER BY a.uuid
-        """
-    ).fetchall()
+    """Just the losers, for callers that mean losers rather than everything."""
+    return [r for r in pending_archive(conn) if r["role"] == "loser"]
 
 
 def _sanitize_name(name: str) -> str:
@@ -122,7 +163,7 @@ def _sidecar(row: Row, sha: str, size: int, stamp: str) -> dict:
     return {
         "uuid": row["uuid"],
         "original_filename": row["original_filename"],
-        "role": "loser",
+        "role": row["role"],
         "set_id": row["set_id"],
         "keeper_uuid": row["keeper_uuid"],
         "lost_on": row["lost_on"],
@@ -155,6 +196,22 @@ def _write_manifest(conn: Connection, root: Path) -> None:
     os.replace(tmp, root / "manifest.csv")
 
 
+MISSING_LISTED = 20
+
+
+def _notes(copied: int, skipped: int, mismatched: int, missing: int, total_bytes: int,
+           missing_uuids: list[str]) -> str:
+    notes = (
+        f"{copied} copied, {skipped} already done, {mismatched} mismatched, "
+        f"{missing} missing, {total_bytes} bytes"
+    )
+    if missing_uuids:
+        listed = ", ".join(missing_uuids[:MISSING_LISTED])
+        more = len(missing_uuids) - MISSING_LISTED
+        notes += f"; missing sources: {listed}" + (f" and {more} more" if more > 0 else "")
+    return notes
+
+
 def run_archive(
     conn: Connection,
     root: Path,
@@ -178,19 +235,24 @@ def run_archive(
     root = Path(root)
     _check_volume(root)
 
-    losers = pending_losers(conn)
+    pending = pending_archive(conn)
     done = {
         (r["uuid"], r["kind"]) for r in conn.execute("SELECT uuid, kind FROM archive_file")
     }
 
-    # Build the path map for every pending loser, not just the ones still
+    # Build the path map for every pending row, not just the ones still
     # missing an original: a loser whose original is already archived but
     # whose edited render is not must still be looked up here, or its edited
     # kind can never be found and the run reports clean when it is not.
-    if paths is None and losers:
+    #
+    # Opening osxphotos costs a full read of a 66,000-asset library, and the
+    # map only ever yields anything for an asset that HAS an edited render or
+    # a Live Photo movie. When nothing pending has either, skip the open.
+    extras = any(r["has_adjustments"] or r["is_live"] for r in pending)
+    if paths is None and extras:
         run_row = get_run(conn)
         if run_row is not None:
-            wanted = {r["uuid"] for r in losers}
+            wanted = {r["uuid"] for r in pending}
             paths = {
                 p.uuid: p for p in iter_paths(Path(run_row["library_path"])) if p.uuid in wanted
             }
@@ -208,10 +270,10 @@ def run_archive(
         return srcs
 
     needs_work = [
-        r for r in losers
+        r for r in pending
         if any((r["uuid"], kind) not in done for kind, _source in sources_for(r))
     ]
-    skipped = len(losers) - len(needs_work)
+    skipped = len(pending) - len(needs_work)
     todo = needs_work[:limit] if limit is not None else needs_work
 
     raw_bytes = sum((r["file_size"] or 0) for r in todo)
@@ -226,34 +288,60 @@ def run_archive(
     set_stage(conn, "archive", "running")
     root.mkdir(parents=True, exist_ok=True)
     copied = mismatched = missing = total_bytes = 0
+    missing_uuids: list[str] = []
 
     for index, row in enumerate(todo, start=1):
         for kind, source in sources_for(row):
             if not source or (row["uuid"], kind) in done:
                 continue
             src = Path(source)
-            if not src.is_file():
+            # Read the source before touching the destination, so a source we
+            # cannot read is one skipped file and never mistaken for the drive
+            # going away.
+            try:
+                with open(src, "rb") as probe:
+                    probe.read(1)
+            except OSError:
                 missing += 1
+                missing_uuids.append(row["uuid"])
                 continue
             rel = dest_for(row, kind, source)
             dst = root / rel
-            dst.parent.mkdir(parents=True, exist_ok=True)
             tmp = dst.with_name(dst.name + ".part")
             try:
+                dst.parent.mkdir(parents=True, exist_ok=True)
                 sha, size = _copy_hashing(src, tmp)
                 check = _sha256_file(tmp)
-            except OSError:
-                tmp.unlink(missing_ok=True)
-                missing += 1
-                continue
-            if check != sha:
-                tmp.unlink(missing_ok=True)
-                mismatched += 1
-                continue
-            os.replace(tmp, dst)
-            stamp = datetime.now().replace(microsecond=0).isoformat()
-            if kind == "original":
-                (root / (rel + ".json")).write_text(json.dumps(_sidecar(row, sha, size, stamp), indent=2))
+                if check != sha:
+                    tmp.unlink(missing_ok=True)
+                    mismatched += 1
+                    continue
+                os.replace(tmp, dst)
+                stamp = datetime.now().replace(microsecond=0).isoformat()
+                if kind == "original":
+                    (root / (rel + ".json")).write_text(
+                        json.dumps(_sidecar(row, sha, size, stamp), indent=2)
+                    )
+            except OSError as exc:
+                # Everything in this block writes to or reads back from the
+                # archive root. Failing here means the destination is gone or
+                # full, and every remaining copy would fail the same way, so
+                # stop with what is already verified committed and kept.
+                try:
+                    tmp.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                conn.commit()
+                set_stage(
+                    conn, "archive", "running",
+                    notes=_notes(copied, skipped, mismatched, missing, total_bytes, missing_uuids)
+                          + f", stopped on a destination error at {dst}",
+                )
+                raise ArchiveDestination(
+                    f"destination error at {dst}: {exc}; the drive may have unmounted "
+                    "or filled; everything verified so far is kept. Re-run "
+                    "`photodedup archive` once the drive is back."
+                ) from exc
             conn.execute(
                 """INSERT INTO archive_file (uuid, kind, dest, bytes, sha256, verified_at)
                    VALUES (?, ?, ?, ?, ?, ?)""",
@@ -276,12 +364,12 @@ def run_archive(
         (r["uuid"], r["kind"]) for r in conn.execute("SELECT uuid, kind FROM archive_file")
     }
     remaining = [
-        r for r in losers
+        r for r in pending
         if any((r["uuid"], kind) not in remaining_done for kind, _source in sources_for(r))
     ]
-    notes = f"{copied} copied, {skipped} already done, {mismatched} mismatched, {missing} missing, {total_bytes} bytes"
+    notes = _notes(copied, skipped, mismatched, missing, total_bytes, missing_uuids)
     if remaining:
-        notes += f", {len(remaining)} losers remaining"
+        notes += f", {len(remaining)} photos remaining"
     status = "complete" if not mismatched and not missing and not remaining else "running"
     set_stage(conn, "archive", status, notes=notes)
     return ArchiveResult(copied, skipped, mismatched, missing, total_bytes)

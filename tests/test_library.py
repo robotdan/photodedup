@@ -162,16 +162,44 @@ def test_read_states_reports_presence_date_and_albums():
     from photodedup.library import AssetState, _read_states_from_db
 
     class Photo:
-        def __init__(self, uuid, date, albums):
+        def __init__(self, uuid, date, albums, intrash=False):
             self.uuid, self.date, self.albums = uuid, date, albums
+            self.intrash = intrash
 
     class DB:
         def get_photo(self, uuid):
-            return {"a": Photo("a", datetime(2014, 5, 12, 17, 0, 0), ["Trips"])}.get(uuid)
+            return {
+                "a": Photo("a", datetime(2014, 5, 12, 17, 0, 0), ["Trips"]),
+                "trashed": Photo("trashed", datetime(2014, 5, 12, 17, 0, 0), ["Dedup Delete 001"], True),
+            }.get(uuid)
 
-    states = _read_states_from_db(DB(), ["a", "gone"])
-    assert states["a"] == AssetState(True, datetime(2014, 5, 12, 17, 0, 0), ("Trips",))
-    assert states["gone"] == AssetState(False, None, ())
+    states = _read_states_from_db(DB(), ["a", "gone", "trashed"])
+    assert states["a"] == AssetState(True, datetime(2014, 5, 12, 17, 0, 0), ("Trips",), False)
+    assert states["gone"] == AssetState(False, None, (), False)
+
+
+def test_read_states_counts_a_trashed_photo_as_trashed_not_present_or_gone():
+    """A photo deleted in Photos stays in the library database until Recently
+    Deleted is emptied. Calling it present would read as "the deletion did not
+    happen"; calling it gone would read as "the archive fallback is the only
+    copy left". It is neither."""
+    from datetime import datetime
+
+    from photodedup.library import _read_states_from_db
+
+    class Photo:
+        uuid = "t"
+        date = datetime(2014, 5, 12, 17, 0, 0)
+        albums = ["Dedup Delete 001"]
+        intrash = True
+
+    class DB:
+        def get_photo(self, uuid):
+            return Photo() if uuid == "t" else None
+
+    states = _read_states_from_db(DB(), ["t", "gone"])
+    assert states["t"].in_trash is True and states["t"].present is False
+    assert states["gone"].in_trash is False and states["gone"].present is False
 
 
 def test_iter_paths_reads_edited_and_live_paths():

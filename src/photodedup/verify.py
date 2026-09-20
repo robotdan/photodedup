@@ -10,12 +10,13 @@ from pathlib import Path
 from sqlite3 import Connection
 
 from photodedup.catalog import get_run, set_stage
-from photodedup.library import AssetState, read_states
+from photodedup.library import AssetState, LibraryUnavailable, read_states
 
 
 @dataclass(frozen=True)
 class VerifyResult:
     losers_present: list[tuple[str, str]]     # (uuid, album)
+    losers_trashed: list[str]                 # deleted in Photos, still recoverable
     losers_gone: list[str]
     keepers_missing: list[str]
     dates_wrong: list[tuple[str, str, str]]   # (uuid, wanted, found)
@@ -54,13 +55,25 @@ def run_verify(conn: Connection, *, states: Mapping[str, AssetState] | None = No
     }
     wanted = set(staged) | set(blank) | set(keepers) | set(dates) | set(merges)
     if states is None:
-        states = read_states(Path(get_run(conn)["library_path"]), sorted(wanted))
+        run_row = get_run(conn)
+        if run_row is None:
+            raise LibraryUnavailable(
+                "This catalog has no run row, so verify does not know which Photos "
+                "library to read. Run `photodedup survey` against the library first."
+            )
+        states = read_states(Path(run_row["library_path"]), sorted(wanted))
 
     def state(uuid: str) -> AssetState:
         return states.get(uuid, AssetState(False, None, ()))
 
+    # A loser the user has deleted in Photos sits in Recently Deleted for 30
+    # days: present() is already False for it, and calling it "gone" would
+    # read as success while it is still recoverable, so it gets its own line.
     losers_present = sorted((u, a) for u, a in staged.items() if state(u).present)
-    losers_gone = sorted(u for u in staged if not state(u).present)
+    losers_trashed = sorted(u for u in staged if state(u).in_trash)
+    losers_gone = sorted(
+        u for u in staged if not state(u).present and not state(u).in_trash
+    )
     keepers_missing = sorted(u for u in keepers if not state(u).present)
     dates_wrong = []
     for uuid, wanted_iso in sorted(dates.items()):
@@ -82,11 +95,13 @@ def run_verify(conn: Connection, *, states: Mapping[str, AssetState] | None = No
     # called out on its own rather than folded into losers_present.
     stale_staged = sorted((u, a) for u, a in staged.items() if u not in current_losers)
     result = VerifyResult(
-        losers_present, losers_gone, keepers_missing, dates_wrong, merges_missing, blank_present, stale_staged,
+        losers_present, losers_trashed, losers_gone, keepers_missing, dates_wrong,
+        merges_missing, blank_present, stale_staged,
     )
     set_stage(
         conn, "verify", "complete",
-        notes=f"{len(losers_present)} losers still present, {len(losers_gone)} gone, "
+        notes=f"{len(losers_present)} losers still present, "
+              f"{len(losers_trashed)} in Recently Deleted, {len(losers_gone)} gone, "
               f"{len(keepers_missing)} keepers missing, {len(dates_wrong)} dates wrong, "
               f"{len(stale_staged)} stale staged",
     )
@@ -100,6 +115,7 @@ def verify_report(r: VerifyResult) -> str:
     lines = [
         "# Verify Report\n",
         f"- Staged losers still in the library: {len(r.losers_present)}",
+        f"- Staged losers in Recently Deleted (recoverable for 30 days): {len(r.losers_trashed)}",
         f"- Staged losers now gone: {len(r.losers_gone)}",
         f"- Keepers missing from the library: {len(r.keepers_missing)}"
         + (", as required" if not r.keepers_missing else " — STOP and investigate before deleting anything else"),

@@ -178,6 +178,11 @@ class AssetState:
     present: bool
     date: datetime | None
     albums: tuple[str, ...]
+    # Last, so existing positional constructions keep working. A photo the
+    # user has deleted in Photos is still in the library database until
+    # Recently Deleted is emptied: it is neither present nor gone, and the
+    # difference is the whole point of running `verify` after a deletion.
+    in_trash: bool = False
 
 
 @dataclass(frozen=True)
@@ -206,10 +211,14 @@ def _read_states_from_db(db: object, uuids: Iterable[str]) -> dict[str, AssetSta
     out: dict[str, AssetState] = {}
     for uuid in uuids:
         photo = db.get_photo(uuid)
+        present = photo is not None and not bool(getattr(photo, "intrash", False))
+        in_trash = photo is not None and bool(getattr(photo, "intrash", False))
         if photo is None:
-            out[uuid] = AssetState(False, None, ())
+            out[uuid] = AssetState(False, None, (), False)
         else:
-            out[uuid] = AssetState(True, _naive(photo.date), tuple(photo.albums or ()))
+            out[uuid] = AssetState(
+                present, _naive(photo.date), tuple(photo.albums or ()), in_trash
+            )
     return out
 
 

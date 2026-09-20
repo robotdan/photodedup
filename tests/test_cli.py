@@ -121,5 +121,23 @@ def test_apply_self_test_refuses_dry_run(catalog):
     assert "--dry-run" in result.output
 
 
+def test_archive_destination_error_is_a_clean_message(catalog, tmp_path, monkeypatch):
+    """The drive unmounting mid-run must read as one sentence, not a traceback."""
+    from photodedup.archive import ArchiveDestination
+
+    def boom(*args, **kwargs):
+        raise ArchiveDestination(
+            "destination error at /Volumes/Extreme Pro/photodedup/x.jpg: [Errno 5] "
+            "Input/output error; the drive may have unmounted or filled; everything "
+            "verified so far is kept."
+        )
+
+    monkeypatch.setattr("photodedup.cli.run_archive", boom)
+    result = run("archive", "--catalog", str(catalog), "--root", str(tmp_path / "arc"))
+    assert result.exit_code != 0
+    assert "destination error at" in result.output and "unmounted" in result.output
+    assert "Traceback" not in result.output
+
+
 def test_verify_command_exists():
     assert "verify" in run("--help").output
