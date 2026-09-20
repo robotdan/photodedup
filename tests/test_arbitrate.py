@@ -360,3 +360,62 @@ def test_decided_at_honours_injected_now(conn):
     add_set(conn, 1, ["a", "b"])
     run_arbitrate(conn, now=NOW)
     assert decision(conn, 1)["decided_at"] == NOW.isoformat()
+
+
+# --- edited copies are never losers ----------------------------------------
+
+
+def test_edited_member_is_never_a_loser():
+    from photodedup.arbitrate import split_protected
+
+    plain = member("p", file_size=10)
+    crop = member("c", file_size=10, has_adjustments=True)
+    keeper, reason, losers = choose_keeper([plain, crop])
+    assert keeper.uuid == "c"
+    losers, kept = split_protected(losers)
+    assert [m.uuid for m, _ in losers] == ["p"]
+    assert [m.uuid for m in kept] == []
+
+
+def test_two_crops_and_two_plain_copies_keep_both_crops(conn):
+    """The set the user found: four identical originals, two carrying crops.
+    Both crops stay as their own photos; only one plain copy is removable."""
+    add_asset(conn, "plain1", size=10, albums=("Others",))
+    add_asset(conn, "crop1", size=10)
+    add_asset(conn, "fav", size=10, favorite=1)
+    add_asset(conn, "crop2", size=10)
+    conn.execute("UPDATE asset SET has_adjustments = 1 WHERE uuid IN ('crop1', 'crop2')")
+    conn.commit()
+    add_set(conn, 1, ["plain1", "crop1", "fav", "crop2"])
+    run_arbitrate(conn, now=NOW)
+    d = decision(conn, 1)
+    assert d["keeper_uuid"] == "fav"
+    losers = conn.execute("SELECT uuid, carries FROM decision_loser WHERE set_id = 1").fetchall()
+    assert [r["uuid"] for r in losers] == ["plain1"]
+    assert json.loads(losers[0]["carries"]) == {"albums": ["Others"]}
+    assert "kept_edits" in d["review_flags"].split(",")
+    assert d["resolvable"] == 1
+
+
+def test_all_edited_set_removes_nothing(conn):
+    add_asset(conn, "a", size=10)
+    add_asset(conn, "b", size=10)
+    conn.execute("UPDATE asset SET has_adjustments = 1")
+    conn.commit()
+    add_set(conn, 1, ["a", "b"])
+    run_arbitrate(conn, now=NOW)
+    assert conn.execute("SELECT COUNT(*) AS n FROM decision_loser").fetchone()["n"] == 0
+    assert "kept_edits" in decision(conn, 1)["review_flags"]
+
+
+def test_edited_keeper_still_records_plain_losers(conn):
+    add_asset(conn, "plain", size=10)
+    add_asset(conn, "edited", size=10)
+    conn.execute("UPDATE asset SET has_adjustments = 1 WHERE uuid = 'edited'")
+    conn.commit()
+    add_set(conn, 1, ["plain", "edited"])
+    run_arbitrate(conn, now=NOW)
+    d = decision(conn, 1)
+    assert d["keeper_uuid"] == "edited"
+    assert [r["uuid"] for r in conn.execute("SELECT uuid FROM decision_loser")] == ["plain"]
+    assert "kept_edits" not in d["review_flags"]

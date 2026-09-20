@@ -171,8 +171,8 @@ def _render_set(
             f"<dt>photos</dt><dd class='{_date_class(m, s, margin)}'>{_e(m['photos_date'] or 'missing')}</dd>"
             f"<dt>added</dt><dd>{_e(m['date_added'])}</dd>"
             f"<dt>hash</dt><dd>{_e(m['hash_status'])}</dd>"
-            f"<dt>{'keeper' if is_keeper else 'lost on'}</dt>"
-            f"<dd>{'KEEP' if is_keeper else _e(m['lost_on'])}</dd>"
+            f"<dt>{'keeper' if is_keeper else ('lost on' if m['lost_on'] else 'kept')}</dt>"
+            f"<dd>{'KEEP' if is_keeper else (_e(m['lost_on']) if m['lost_on'] else 'KEEP (edited)')}</dd>"
             + (f"<dt>carries</dt><dd>{_e(json.dumps(carries))}</dd>" if carries else "")
             + "</dl></div>"
         )
@@ -330,6 +330,14 @@ def write_review(
     resolvable = sum(1 for e in entries if e["set"]["resolvable"])
     rescued = sum(1 for e in entries if e["set"]["date_changes"])
     exact_assets = sum(e["set"]["size"] for e in exact)
+    # Removable is the loser count rather than assets minus sets: an edited
+    # copy stays as its own photo and is never a loser.
+    removable = conn.execute(
+        """
+        SELECT COUNT(*) AS n FROM decision_loser l
+        JOIN dup_set s ON s.id = l.set_id WHERE s.tier = 'exact'
+        """
+    ).fetchone()["n"]
     damaged = conn.execute(
         """
         SELECT COUNT(*) AS n FROM asset_hash h
@@ -341,7 +349,7 @@ def write_review(
     keeper_smaller = flag_counts.get("keeper_smaller", 0)
     totals = [
         ("sets", f"{len(entries)} sets ({len(exact)} exact, {len(candidate)} candidate)"),
-        ("exact assets", f"{exact_assets} assets in exact sets, {exact_assets - len(exact)} removable"),
+        ("exact assets", f"{exact_assets} assets in exact sets, {removable} removable"),
         ("resolvable", f"{resolvable} resolvable"),
         ("dates rescued", f"{rescued} dates rescued"),
         ("keeper smaller than an intact loser", f"{keeper_smaller}, as required" if keeper_smaller == 0 else f"{keeper_smaller} — BUG, do not proceed"),

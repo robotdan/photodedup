@@ -276,3 +276,15 @@ def test_symlink_at_thumbs_is_replaced_and_its_target_is_untouched(populated, tm
     assert not (out / "thumbs").is_symlink()
     assert (out / "thumbs").is_dir()
     assert (target_dir / "keep.txt").read_text() == "do not touch"
+
+
+def test_kept_edit_is_marked_as_kept_not_lost(populated, tmp_path):
+    populated.execute("UPDATE asset SET has_adjustments = 1 WHERE uuid = 'b3'")
+    populated.commit()
+    run_arbitrate(populated)
+    out = tmp_path / "out"
+    write_review(populated, out)
+    text = " ".join(parse(out / "exact" / "001.html").text)
+    assert "KEEP (edited)" in text
+    index = " ".join(parse(out / "index.html").text)
+    assert "2 removable" in index

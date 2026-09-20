@@ -36,7 +36,7 @@ SIZE_SPREAD_BYTES = 1_000_000
 
 # Flags that describe a rule doing its job rather than a doubt about the
 # decision. They are surfaced for sampling and do not block resolvability.
-_INFORMATIONAL_FLAGS = frozenset({"size_spread", "dates_disagree"})
+_INFORMATIONAL_FLAGS = frozenset({"size_spread", "dates_disagree", "kept_edits"})
 
 
 @dataclass(frozen=True)
@@ -111,6 +111,22 @@ def choose_keeper(
     return keeper, reason, losers
 
 
+def split_protected(
+    losers: Sequence[tuple[Member, str]],
+) -> tuple[list[tuple[Member, str]], list[Member]]:
+    """Separate the losers a later phase may delete from the ones it may not.
+
+    A member with adjustments is a distinct photograph the user made (a crop,
+    a colour edit) on top of the same original bytes. It shares the set
+    because grouping hashes originals, but it is not a duplicate of anything,
+    so it is never a loser: it stays as its own photo. Returns
+    (removable losers, protected members).
+    """
+    removable = [(m, why) for m, why in losers if not m.has_adjustments]
+    protected = [m for m, _ in losers if m.has_adjustments]
+    return removable, protected
+
+
 def _is_filename_echo(value: str, m: Member) -> bool:
     name = m.original_filename or ""
     stem = PurePath(name).stem
@@ -151,8 +167,9 @@ def review_flags(
 ) -> list[str]:
     """Flags are appended in this fixed order: candidate_tier, dates_disagree,
     no_plausible_date, png, multiframe, truncated_member, unhashed_member,
-    size_spread, keeper_smaller. Only `size_spread` and `dates_disagree` are
-    informational; every other flag blocks resolvability."""
+    size_spread, kept_edits, keeper_smaller. Only `size_spread`,
+    `dates_disagree` and `kept_edits` are informational; every other flag
+    blocks resolvability."""
     flags: list[str] = []
     if tier == "candidate":
         flags.append("candidate_tier")
@@ -171,6 +188,8 @@ def review_flags(
     intact_sizes = [m.file_size for m in members if m.hash_status == "ok" and m.file_size is not None]
     if len(intact_sizes) > 1 and max(intact_sizes) - min(intact_sizes) >= SIZE_SPREAD_BYTES:
         flags.append("size_spread")
+    if any(m.has_adjustments and m.uuid != keeper.uuid for m in members):
+        flags.append("kept_edits")
     # Impossible under rank_key. Computed from the data, not the rule, so a
     # bug in the rule shows up in the report instead of in a deletion.
     if keeper.hash_status == "ok" and any(
@@ -254,7 +273,8 @@ def run_arbitrate(
         conn.execute("DELETE FROM decision")
         for s in sets:
             members = load_members(conn, s["id"])
-            keeper, reason, losers = choose_keeper(members)
+            keeper, reason, ranked = choose_keeper(members)
+            losers, _protected = split_protected(ranked)
             date = choose_date_pooled(_pools(conn, members), margin=margin, now=now)
             flags = review_flags(s["tier"], members, keeper, date)
             blocking = set(flags) - _INFORMATIONAL_FLAGS
