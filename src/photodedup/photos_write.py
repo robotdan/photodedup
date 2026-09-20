@@ -113,7 +113,7 @@ class PhotoscriptWriter:
 
     def add_to_album(self, album_id: str, uuids: list[str]) -> list[str]:
         album = self._ps.Album(album_id)
-        already = {p.uuid for p in album.photos}
+        already = {p.uuid for p in album.photos()}
         todo = [self._photo(u) for u in uuids if u not in already]
         if not todo:
             return []
