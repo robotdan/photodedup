@@ -443,8 +443,9 @@ library; see "The one outstanding action" above.
 
 What the reviews established, which the commit messages do not record:
 
-- photoscript's `Album.photos` is a method, not a property — calling it bare
-  silently iterates nothing instead of raising. A stand-in-module test now
+- photoscript's `Album.photos` is a method rather than a property, so
+  iterating it bare raises `TypeError` the first time it runs against a
+  real Photos session, which no headless test can see. A stand-in-module test now
   pins every API shape `photos_write.py` relies on, so a future photoscript
   release that changes a signature fails loudly in CI instead of quietly in
   Photos.
@@ -643,13 +644,12 @@ Give the new session this file and nothing else; it names everything.
 4. Do whatever the "Phase 2 results" section says is outstanding. If it is
    still empty, that means `group` and `duplicates` have not been run and
    their numbers not recorded; do that first.
-5. Phase 3 (arbitrate, review report) is BUILD COMPLETE but has not been run
-   against the real catalog. Do whatever "The one outstanding action" at the
-   top of this file says, then fill in "Phase 3 results". Phase 4 (archive,
-   apply, verify) has no plan yet; write it from the Phase 3 numbers, using
-   the brainstorming skill, then writing-plans, then subagent-driven
-   development, as Phases 1 through 3 did. Its obligations are recorded
-   above under "Phase 4 obligations".
+5. Phase 4 (archive, apply, verify) is BUILD COMPLETE but has not touched
+   the real library. Do whatever "The one outstanding action" at the top of
+   this file says, in order: self-test, archive trial, archive, dry run,
+   merge, dates, stage, verify. Record the numbers under a "Phase 4 results"
+   heading. Only then delete the staged albums in Photos, and run `verify`
+   again afterwards.
 
 What worked in Phases 1 and 2, keep doing: a fresh subagent per task with
 the plan carrying complete code; a reviewer per task on a mid-tier model,
