@@ -142,7 +142,17 @@ single-threaded run exactly on every column (status and all hash values,
 The 16 hash-error files were inspected on 2026-09-19; see "Hash-error
 inspection" below. Nothing is outstanding before Phase 3 design.
 
-## Phase 3 results (real run, 2026-09-19)
+## Phase 3 results (schema v4 rerun and user sign-off, 2026-09-20)
+
+Rebuilt at v4 after the sampling amendments: 64,081 ok, 17 truncated, 7
+flat; 16,849 exact sets, 3,170 candidate; 16,836 resolvable, 108 dates
+rescued; flags kept_edits 8, partial_render 67, blank_image 2; keeper
+reasons albums 16,944, file_size 2,760, date_added 95, adjustments 87,
+caption 71, favorite 52, intact 4, clean_name 3, rendered 2, uuid 1. The
+user sampled the dates, size-spread, truncated, partially rendered, blank
+and edited pages and accepted the decisions. Phase 4 may start.
+
+## Phase 3 results (first run, 2026-09-19, schema v3, superseded)
 
 Catalog rebuilt at schema v3 in the user's terminal with `--workers 4`.
 Hash: 64,081 ok, 17 truncated, 1,875 no original, 1 error (the JSON
