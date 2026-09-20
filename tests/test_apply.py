@@ -340,6 +340,24 @@ def test_stage_dry_run_creates_nothing(staged):
     assert fake.albums == {}
 
 
+def test_stage_ignores_a_non_numeric_album_name_when_resuming(staged):
+    """A stray/legacy 'stage' row whose album name doesn't end in a number
+    must not blow up the index parsing that finds where to resume."""
+    fake = fake_for(staged)
+    # 'bk' is a real asset that never gets a 'stage' action (it's a blank-image
+    # keeper, staged separately as 'stage_blank'), so this row is a harmless
+    # stand-in for a stray/legacy album name with no numeric suffix.
+    staged.execute(
+        """INSERT INTO apply_action (uuid, action, status, detail, previous, applied_at)
+           VALUES ('bk', 'stage', 'done', ?, NULL, ?)""",
+        (json.dumps({"album": "Dedup Delete legacy"}), NOW.isoformat()),
+    )
+    staged.commit()
+    result = run_stage(staged, fake, batch=3, now=NOW)
+    assert result.failed == 0
+    assert result.done == 9
+
+
 def test_losers_csv(staged, tmp_path):
     fake = fake_for(staged)
     run_stage(staged, fake, batch=3, now=NOW)
@@ -369,3 +387,12 @@ def test_self_test_reports_a_drifting_date():
         self_test(fake, "p", now=NOW)
     assert "drift" in str(exc.value)
     assert fake.get("p").title == "t"
+
+
+def test_self_test_refuses_a_photo_with_no_capture_date_before_touching_it():
+    fake = FakePhotos({"p": {"title": "t", "date": None}})
+    with pytest.raises(RuntimeError) as exc:
+        self_test(fake, "p", now=NOW)
+    assert "no capture date" in str(exc.value)
+    assert fake.albums == {}
+    assert fake.calls == []

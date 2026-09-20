@@ -296,14 +296,21 @@ def archive(catalog: Path, root: Path, limit: int | None) -> None:
 @click.option("--include-disagreeing-dates", is_flag=True, help="Also correct dates in sets flagged dates_disagree (sampled by you).")
 @click.option("--dry-run", is_flag=True, help="Print every action without writing anything.")
 @click.option("--batch", type=int, default=500, show_default=True)
+@click.option(
+    "--losers-csv", type=click.Path(path_type=Path), default=Path("losers.csv"), show_default=True,
+    help="Where to write the staged-loser manifest.",
+)
 @click.option("--self-test", "test_uuid", default=None, help="UUID of one existing photo: prove the write path on it and restore it.")
 def apply(catalog: Path, do_merge: bool, do_dates: bool, do_stage: bool, do_all: bool,
-          include_disagreeing_dates: bool, dry_run: bool, batch: int, test_uuid: str | None) -> None:
+          include_disagreeing_dates: bool, dry_run: bool, batch: int, losers_csv: Path,
+          test_uuid: str | None) -> None:
     """Apply the decisions to Photos. Never deletes anything. Interactive terminal only."""
     conn = open_catalog(catalog)
     if do_all:
         do_merge = do_dates = do_stage = True
     if test_uuid:
+        if dry_run:
+            raise click.UsageError("--self-test performs real (restored) writes; drop --dry-run")
         try:
             for line in self_test(PhotoscriptWriter(), test_uuid):
                 click.echo(line)
@@ -333,8 +340,10 @@ def apply(catalog: Path, do_merge: bool, do_dates: bool, do_stage: bool, do_all:
             notes.append(line)
         if do_stage:
             r = run_stage(conn, writer, batch=batch, dry_run=dry_run)
-            n = write_losers_csv(conn, Path("losers.csv"))
-            line = f"stage: {r.done} done, {r.failed} failed, {r.skipped} already done; losers.csv lists {n}"
+            line = f"stage: {r.done} done, {r.failed} failed, {r.skipped} already done"
+            if not dry_run:
+                n = write_losers_csv(conn, losers_csv)
+                line += f"; {losers_csv} lists {n}"
             click.echo(line)
             notes.append(line)
         if dry_run:

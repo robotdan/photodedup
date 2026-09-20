@@ -328,7 +328,13 @@ def run_stage(conn: Connection, writer: PhotosWriter, *, batch: int = BATCH, dry
         set_stage(conn, "apply", "running")
 
     counts = _album_counts(conn)
-    index = max([int(name.rsplit(" ", 1)[1]) for name in counts] or [1])
+    indices = []
+    for name in counts:
+        try:
+            indices.append(int(name.rsplit(" ", 1)[1]))
+        except ValueError:
+            continue
+    index = max(indices or [1])
     while counts.get(_album_name(index), 0) >= batch:
         index += 1
 
@@ -405,6 +411,8 @@ def self_test(writer: PhotosWriter, uuid: str, *, now: datetime | None = None) -
     if not writer.exists(uuid):
         raise RuntimeError(f"photo {uuid} not found in Photos")
     original = writer.get(uuid)
+    if original.date is None:
+        raise RuntimeError("photo has no capture date; pick another photo for the self-test")
     marker_title = f"photodedup self-test {_now(now)}"
     marker_date = datetime(2003, 2, 23, 9, 8, 8)
     album_id = None

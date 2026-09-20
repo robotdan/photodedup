@@ -1,6 +1,7 @@
 catalog.sqlite
 catalog.sqlite-wal
 catalog.sqlite-shm
+losers.csv
 .venv/
 __pycache__/
 *.pyc

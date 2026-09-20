@@ -86,9 +86,36 @@ def test_apply_refuses_without_archive(catalog):
     assert "archive stage" in result.output
 
 
-def test_apply_real_write_needs_a_gui_session(catalog, tmp_path):
-    """In this shell photoscript cannot load; the command must say so plainly."""
+def test_apply_real_write_needs_a_gui_session(catalog, monkeypatch):
+    """PhotoscriptWriter raises PhotosUnavailable outside a GUI session; simulate
+    that refusal instead of depending on whether Photos happens to be scriptable
+    from whatever shell runs the suite (in a real GUI session PhotoscriptWriter()
+    would succeed and launch Photos)."""
+    from photodedup.photos_write import PhotosUnavailable
+
     conn = open_catalog(catalog); set_stage(conn, "arbitrate", "complete"); set_stage(conn, "archive", "complete"); conn.close()
+
+    def boom():
+        raise PhotosUnavailable(
+            "Photos cannot be scripted from this process (photoscript failed to load). "
+            "Run this command from an interactive terminal session on the Mac that owns the library."
+        )
+
+    monkeypatch.setattr("photodedup.cli.PhotoscriptWriter", boom)
     result = run("apply", "--catalog", str(catalog), "--stage")
     assert result.exit_code != 0
-    assert "interactive" in result.output or "Photos cannot be scripted" in result.output
+    assert "Photos cannot be scripted" in result.output and "interactive" in result.output
+
+
+def test_apply_dry_run_writes_no_csv(catalog, monkeypatch, tmp_path):
+    conn = open_catalog(catalog); set_stage(conn, "arbitrate", "complete"); set_stage(conn, "archive", "complete"); conn.close()
+    monkeypatch.chdir(tmp_path)
+    result = run("apply", "--catalog", str(catalog), "--stage", "--dry-run")
+    assert result.exit_code == 0, result.output
+    assert not (tmp_path / "losers.csv").exists()
+
+
+def test_apply_self_test_refuses_dry_run(catalog):
+    result = run("apply", "--catalog", str(catalog), "--self-test", "abc", "--dry-run")
+    assert result.exit_code != 0
+    assert "--dry-run" in result.output
