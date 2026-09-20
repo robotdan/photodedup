@@ -112,8 +112,8 @@ def test_asset_hash_is_one_row_per_asset(conn):
         conn.execute("INSERT INTO asset_hash (uuid, status) VALUES ('u1', 'ok')")
 
 
-def test_schema_version_is_three(conn):
-    assert SCHEMA_VERSION == 3
+def test_schema_version_is_four(conn):
+    assert SCHEMA_VERSION == 4
 
 
 def test_version_mismatch_is_refused(tmp_path):
@@ -127,9 +127,6 @@ def test_version_mismatch_is_refused(tmp_path):
         open_catalog(path)
     assert "re-run the survey" in str(excinfo.value)
 
-
-def test_schema_version_is_3():
-    assert SCHEMA_VERSION == 3
 
 
 def test_phase3_tables_exist(conn):
@@ -212,3 +209,16 @@ def test_require_stage_complete_refuses_when_never_run(conn):
 
 def test_require_stage_complete_force_overrides(conn):
     require_stage_complete(conn, "group", force=True)
+
+
+def test_schema_version_is_4():
+    assert SCHEMA_VERSION == 4
+
+
+def test_asset_hash_has_render_columns(conn):
+    conn.execute("INSERT INTO asset (uuid) VALUES ('u1')")
+    conn.execute(
+        "INSERT INTO asset_hash (uuid, status, blank_rows, flat) VALUES ('u1', 'ok', 12, 1)"
+    )
+    row = conn.execute("SELECT blank_rows, flat FROM asset_hash WHERE uuid='u1'").fetchone()
+    assert (row["blank_rows"], row["flat"]) == (12, 1)

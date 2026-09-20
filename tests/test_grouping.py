@@ -367,3 +367,23 @@ def test_partner_diverging_within_the_probe_is_rejected_without_a_full_read(
     assert len(pairs) == 1
     digest, uuids = pairs[0]
     assert set(uuids) == {"tr1", "ok_match"}
+
+
+def test_flat_images_never_join_a_dhash_group(conn):
+    """Every flat image has the same dhash. That says nothing about the
+    images, so flat images stay out of the look-alike tier."""
+    add(conn, "u1", dhash="0000000000000000")
+    add(conn, "u2", dhash="0000000000000000")
+    conn.execute("UPDATE asset_hash SET flat = 1")
+    conn.commit()
+    run_group(conn)
+    assert groups(conn, "dhash") == []
+
+
+def test_flat_images_still_form_exact_groups(conn):
+    add(conn, "u1", pixel="ppp")
+    add(conn, "u2", pixel="ppp")
+    conn.execute("UPDATE asset_hash SET flat = 1")
+    conn.commit()
+    run_group(conn)
+    assert len(groups(conn, "pixel")) == 1

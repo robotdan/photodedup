@@ -288,3 +288,18 @@ def test_kept_edit_is_marked_as_kept_not_lost(populated, tmp_path):
     assert "KEEP (edited)" in text
     index = " ".join(parse(out / "index.html").text)
     assert "2 removable" in index
+
+
+def test_blank_rows_and_blank_sample_page(populated, tmp_path):
+    populated.execute("UPDATE asset_hash SET blank_rows = 12 WHERE uuid = 'b2'")
+    populated.execute("UPDATE asset_hash SET flat = 1, blank_rows = 8 WHERE uuid IN ('c1', 'c2')")
+    populated.commit()
+    run_arbitrate(populated)
+    out = tmp_path / "out"
+    write_review(populated, out)
+    text = " ".join(parse(out / "exact" / "001.html").text)
+    assert "12 blank rows" in text
+    blank = " ".join(parse(out / "samples" / "blank.html").text)
+    assert "c1.jpg" in blank
+    partial = " ".join(parse(out / "samples" / "partial.html").text)
+    assert "b2.jpg" in partial

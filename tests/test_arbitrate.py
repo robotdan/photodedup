@@ -29,8 +29,8 @@ def member(uuid, **overrides):
 
 def test_rule_names_are_fixed():
     assert KEEPER_RULES == (
-        "intact", "file_size", "favorite", "adjustments", "caption", "albums",
-        "date_added", "uuid",
+        "intact", "rendered", "file_size", "favorite", "adjustments", "caption",
+        "albums", "clean_name", "date_added", "uuid",
     )
 
 
@@ -419,3 +419,60 @@ def test_edited_keeper_still_records_plain_losers(conn):
     assert d["keeper_uuid"] == "edited"
     assert [r["uuid"] for r in conn.execute("SELECT uuid FROM decision_loser")] == ["plain"]
     assert "kept_edits" not in d["review_flags"]
+
+
+# --- rendered completeness, blank images, clean names ---------------------
+
+
+def test_rule_names_include_rendered_and_clean_name():
+    assert KEEPER_RULES == (
+        "intact", "rendered", "file_size", "favorite", "adjustments", "caption",
+        "albums", "clean_name", "date_added", "uuid",
+    )
+
+
+def test_fewer_blank_rows_beats_bigger_file():
+    partial = member("p", file_size=2_066_603, blank_rows=144)
+    full = member("f", file_size=1_968_457, blank_rows=0)
+    keeper, reason, losers = choose_keeper([partial, full])
+    assert keeper.uuid == "f" and reason == "rendered"
+
+
+def test_all_damaged_picks_the_least_damaged():
+    a = member("a", file_size=1_259_385, blank_rows=64)
+    b = member("b", file_size=1_147_802, blank_rows=79, hash_status="truncated")
+    keeper, reason, _ = choose_keeper([a, b])
+    assert keeper.uuid == "a"
+
+
+def test_clean_name_breaks_a_tie_before_date_added():
+    suffixed = member("s", original_filename="IMG_0001 (1).jpg", date_added="2019-01-01T00:00:00")
+    clean = member("c", original_filename="IMG_0001.jpg", date_added="2021-01-01T00:00:00")
+    keeper, reason, _ = choose_keeper([suffixed, clean])
+    assert keeper.uuid == "c" and reason == "clean_name"
+
+
+def test_partial_render_flag_is_informational(conn):
+    add_asset(conn, "a", size=20)
+    add_asset(conn, "b", size=10)
+    conn.execute("UPDATE asset_hash SET blank_rows = 30 WHERE uuid = 'a'")
+    conn.execute("UPDATE asset_hash SET blank_rows = 0 WHERE uuid = 'b'")
+    conn.commit()
+    add_set(conn, 1, ["a", "b"])
+    run_arbitrate(conn, now=NOW)
+    d = decision(conn, 1)
+    assert d["keeper_uuid"] == "b" and d["keeper_reason"] == "rendered"
+    assert "partial_render" in d["review_flags"].split(",")
+    assert d["resolvable"] == 1
+
+
+def test_blank_image_flag_when_every_member_is_flat(conn):
+    add_asset(conn, "a", size=10)
+    add_asset(conn, "b", size=10)
+    conn.execute("UPDATE asset_hash SET flat = 1, blank_rows = 30")
+    conn.commit()
+    add_set(conn, 1, ["a", "b"])
+    run_arbitrate(conn, now=NOW)
+    d = decision(conn, 1)
+    assert "blank_image" in d["review_flags"].split(",")
+    assert d["resolvable"] == 1

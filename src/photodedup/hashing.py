@@ -142,6 +142,32 @@ class PixelHashes:
     phash: str
     width: int
     height: int
+    blank_rows: int
+    flat: bool
+
+
+def blank_tail(pixels: bytes, width: int, height: int) -> int:
+    """Rows at the bottom of an RGB buffer that are one uniform colour.
+
+    A JPEG cut short renders its missing rows as a flat fill (grey, or the
+    last DC value), whether or not an EOI was later appended, so this is the
+    one measure of damage that survives a "structurally complete" file. On a
+    genuine photo with a flat bottom border the number is small and, between
+    true duplicates, identical, so ranking on it never separates real copies.
+    """
+    row = width * 3
+    if row == 0 or height == 0:
+        return 0
+    last = pixels[-row:]
+    if last != last[:3] * width:
+        return 0
+    count = 0
+    for y in range(height - 1, -1, -1):
+        if pixels[y * row : (y + 1) * row] == last:
+            count += 1
+        else:
+            break
+    return count
 
 
 def real_length(data: bytes) -> int:
@@ -180,15 +206,19 @@ def pixel_hashes(
             image = ImageOps.exif_transpose(image)
             rgb = image.convert("RGB")
             width, height = rgb.size
+            pixels = rgb.tobytes()
             digest = hashlib.sha256()
             digest.update(f"{width}x{height}|".encode())
-            digest.update(rgb.tobytes())
+            digest.update(pixels)
+            blank = blank_tail(pixels, width, height)
             return PixelHashes(
                 pixel_hash=digest.hexdigest(),
                 dhash=str(imagehash.dhash(rgb, hash_size=8)),
                 phash=str(imagehash.phash(rgb, hash_size=8)),
                 width=width,
                 height=height,
+                blank_rows=blank,
+                flat=blank == height,
             )
     except Exception:
         return None

@@ -167,13 +167,15 @@ def run_group(conn: Connection, *, force: bool = False) -> GroupResult:
         # may look like its intact twin; that belongs in review, never in an
         # exact group.
         statuses = "('ok', 'truncated')" if tier == "candidate" else "('ok')"
+        # Every flat image shares one dhash; that says nothing about them.
+        flat = "AND h.flat = 0" if tier == "candidate" else ""
         rows = conn.execute(
             f"""
             SELECT h.{column} AS digest, a.kind AS kind, a.has_raw AS has_raw,
                    GROUP_CONCAT(a.uuid) AS uuids, COUNT(*) AS n
             FROM asset_hash h
             JOIN asset a ON a.uuid = h.uuid AND a.survey_status = 'ok'
-            WHERE h.status IN {statuses} AND h.{column} IS NOT NULL {multiframe}
+            WHERE h.status IN {statuses} AND h.{column} IS NOT NULL {multiframe} {flat}
             GROUP BY h.{column}, a.kind, a.has_raw
             HAVING n > 1
             """

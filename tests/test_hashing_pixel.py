@@ -227,3 +227,47 @@ def test_lenient_decode_from_bytes_matches_path(tmp_path):
     assert from_path.pixel_hash == from_bytes.pixel_hash
     assert from_path.dhash == from_bytes.dhash
     assert from_path.phash == from_bytes.phash
+
+
+# --- rendered completeness -------------------------------------------------
+
+
+def test_intact_noisy_image_has_no_blank_rows(tmp_path):
+    hashes = pixel_hashes(make_noisy_jpeg(tmp_path / "n.jpg"))
+    assert hashes.blank_rows == 0
+    assert hashes.flat is False
+
+
+def test_truncated_image_reports_blank_tail_rows(tmp_path):
+    """Cut deep enough to lose whole MCU rows: libjpeg fills those with a
+    flat grey. A cut inside the last MCU row leaves a garbled row instead,
+    which this measure does not count, and the real damaged files in this
+    library all lose dozens of rows."""
+    intact = make_noisy_jpeg(tmp_path / "intact.jpg")
+    data = intact.read_bytes()
+    cut = tmp_path / "t.jpg"
+    cut.write_bytes(data[: data.rfind(b"\xff\xd9") - 2000])
+    hashes = pixel_hashes(cut, lenient=True)
+    assert 0 < hashes.blank_rows < 64
+    assert hashes.flat is False
+
+
+def test_flat_image_is_flat_and_entirely_blank(tmp_path):
+    path = tmp_path / "black.png"
+    Image.new("RGB", (40, 30), "black").save(path)
+    hashes = pixel_hashes(path)
+    assert hashes.flat is True
+    assert hashes.blank_rows == 30
+
+
+def test_uniform_bottom_band_on_a_real_image_counts_only_the_band(tmp_path):
+    """A photo whose last rows are genuinely uniform (a white border) reports
+    those rows; the rule only ever ranks members of one set against each
+    other, and true duplicates share the same band."""
+    im = Image.effect_noise((40, 30), 64).convert("RGB")
+    im.paste((255, 255, 255), (0, 26, 40, 30))
+    path = tmp_path / "band.png"
+    im.save(path)
+    hashes = pixel_hashes(path)
+    assert hashes.blank_rows == 4
+    assert hashes.flat is False

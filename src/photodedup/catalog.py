@@ -6,7 +6,7 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 DATE_SOURCES = ("takeout_json", "exif", "filename", "photos_db", "file_mtime")
 
@@ -89,6 +89,8 @@ CREATE TABLE IF NOT EXISTS asset_hash (
     pixel_width  INTEGER,
     pixel_height INTEGER,
     bytes_read   INTEGER,
+    blank_rows   INTEGER,
+    flat         INTEGER NOT NULL DEFAULT 0,
     hashed_at    TEXT
 );
 

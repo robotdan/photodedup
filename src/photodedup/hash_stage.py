@@ -49,6 +49,8 @@ def _truncated_row(
         "phash": partial.phash,
         "pixel_width": partial.width,
         "pixel_height": partial.height,
+        "blank_rows": partial.blank_rows,
+        "flat": int(partial.flat),
         "bytes_read": bytes_read,
     }
 
@@ -101,6 +103,8 @@ def hash_one(uuid: str, path: str | None, kind: str, uti: str | None) -> dict:
         row["phash"] = pixels.phash
         row["pixel_width"] = pixels.width
         row["pixel_height"] = pixels.height
+        row["blank_rows"] = pixels.blank_rows
+        row["flat"] = int(pixels.flat)
 
     if row.get("scan_hash") is None and pixels is None:
         # Neither signal: either the file is not an image at all, or it is a
@@ -114,13 +118,17 @@ def hash_one(uuid: str, path: str | None, kind: str, uti: str | None) -> dict:
 
 _COLUMNS = (
     "status", "error", "scan_hash", "pixel_hash", "dhash", "phash",
-    "video_hash", "pixel_width", "pixel_height", "bytes_read", "hashed_at",
+    "video_hash", "pixel_width", "pixel_height", "bytes_read", "blank_rows",
+    "flat", "hashed_at",
 )
 
 
 def _write(conn: Connection, row: dict) -> None:
     row = dict(row)
     row["hashed_at"] = datetime.now().replace(microsecond=0).isoformat()
+    # A row with no decode (video, no original, error) has nothing to say
+    # about flatness; the column is NOT NULL so it must still carry a value.
+    row.setdefault("flat", 0)
     values = [row["uuid"]] + [row.get(c) for c in _COLUMNS]
     placeholders = ", ".join("?" * (len(_COLUMNS) + 1))
     updates = ", ".join(f"{c} = excluded.{c}" for c in _COLUMNS)

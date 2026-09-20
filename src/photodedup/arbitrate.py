@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -28,15 +29,20 @@ from photodedup.grouping import MULTIFRAME_UTIS
 # Tie-break order, highest priority first. Each name is the value written to
 # `decision.keeper_reason` and `decision_loser.lost_on`.
 KEEPER_RULES: tuple[str, ...] = (
-    "intact", "file_size", "favorite", "adjustments", "caption", "albums",
-    "date_added", "uuid",
+    "intact", "rendered", "file_size", "favorite", "adjustments", "caption",
+    "albums", "clean_name", "date_added", "uuid",
 )
+
+# A copy whose name Photos or Finder suffixed on import: "IMG_0001 (1).jpg".
+_SUFFIXED_NAME = re.compile(r"\s?\(\d+\)\.[^.]+$")
 
 SIZE_SPREAD_BYTES = 1_000_000
 
 # Flags that describe a rule doing its job rather than a doubt about the
 # decision. They are surfaced for sampling and do not block resolvability.
-_INFORMATIONAL_FLAGS = frozenset({"size_spread", "dates_disagree", "kept_edits"})
+_INFORMATIONAL_FLAGS = frozenset(
+    {"size_spread", "dates_disagree", "kept_edits", "partial_render", "blank_image"}
+)
 
 
 @dataclass(frozen=True)
@@ -55,6 +61,8 @@ class Member:
     file_mtime: str | None
     uti: str | None
     original_filename: str | None
+    blank_rows: int = 0
+    flat: bool = False
 
 
 @dataclass(frozen=True)
@@ -80,11 +88,13 @@ def rank_key(m: Member) -> tuple:
     missing) never wins the `intact` component, only `truncated` does."""
     return (
         0 if m.hash_status == "ok" else 1,
+        m.blank_rows or 0,
         -(m.file_size or 0),
         0 if m.is_favorite else 1,
         0 if m.has_adjustments else 1,
         0 if _has_caption(m) else 1,
         -len(set(m.albums)),
+        1 if _SUFFIXED_NAME.search(m.original_filename or "") else 0,
         _added_ts(m.date_added),
         m.uuid,
     )
@@ -167,9 +177,9 @@ def review_flags(
 ) -> list[str]:
     """Flags are appended in this fixed order: candidate_tier, dates_disagree,
     no_plausible_date, png, multiframe, truncated_member, unhashed_member,
-    size_spread, kept_edits, keeper_smaller. Only `size_spread`,
-    `dates_disagree` and `kept_edits` are informational; every other flag
-    blocks resolvability."""
+    size_spread, kept_edits, partial_render, blank_image, keeper_smaller.
+    Only `size_spread`, `dates_disagree`, `kept_edits`, `partial_render` and
+    `blank_image` are informational; every other flag blocks resolvability."""
     flags: list[str] = []
     if tier == "candidate":
         flags.append("candidate_tier")
@@ -190,11 +200,19 @@ def review_flags(
         flags.append("size_spread")
     if any(m.has_adjustments and m.uuid != keeper.uuid for m in members):
         flags.append("kept_edits")
-    # Impossible under rank_key. Computed from the data, not the rule, so a
-    # bug in the rule shows up in the report instead of in a deletion.
-    if keeper.hash_status == "ok" and any(
-        m.hash_status == "ok" and (m.file_size or 0) > (keeper.file_size or 0)
-        for m in members
+    if any((m.blank_rows or 0) > 0 and not m.flat for m in members):
+        flags.append("partial_render")
+    if members and all(m.flat for m in members):
+        flags.append("blank_image")
+    # Impossible under rank_key. Computed from the data rather than the rule,
+    # so a bug in the rule shows up in the report instead of in a deletion.
+    # Only fully rendered members count: a complete file legitimately beats a
+    # larger one that lost its tail.
+    def whole(m: Member) -> bool:
+        return m.hash_status == "ok" and (m.blank_rows or 0) == 0
+
+    if whole(keeper) and any(
+        whole(m) and (m.file_size or 0) > (keeper.file_size or 0) for m in members
     ):
         flags.append("keeper_smaller")
     return flags
@@ -210,7 +228,7 @@ def load_members(conn: Connection, set_id: int) -> list[Member]:
         SELECT a.uuid, COALESCE(h.status, 'missing') AS hash_status, a.file_size,
                a.is_favorite, a.has_adjustments, a.title, a.description,
                a.albums, a.keywords, a.date_added, a.photos_date, a.file_mtime,
-               a.uti, a.original_filename
+               a.uti, a.original_filename, h.blank_rows, h.flat
         FROM dup_set_member m
         JOIN asset a ON a.uuid = m.uuid
         LEFT JOIN asset_hash h ON h.uuid = a.uuid
@@ -235,6 +253,8 @@ def load_members(conn: Connection, set_id: int) -> list[Member]:
             file_mtime=r["file_mtime"],
             uti=r["uti"],
             original_filename=r["original_filename"],
+            blank_rows=r["blank_rows"] or 0,
+            flat=bool(r["flat"]),
         )
         for r in rows
     ]

@@ -247,3 +247,19 @@ def test_intact_jpeg_with_trailing_bytes_stays_ok(tmp_path):
         assert row["status"] == "ok", f"Failed for {path.name}"
         assert row.get("scan_hash") is not None, f"No scan hash for {path.name}"
         assert row["dhash"] and row["phash"] and row["pixel_hash"]
+
+
+def test_render_columns_are_written(conn, tmp_path):
+    black = tmp_path / "black.png"
+    Image.new("RGB", (16, 16), "black").save(black)
+    add_asset(conn, "u1", path=black, uti="public.png")
+    deep = tmp_path / "deep.jpg"
+    Image.effect_noise((96, 64), 64).convert("RGB").save(deep, quality=95)
+    data = deep.read_bytes()
+    deep.write_bytes(data[: data.rfind(b"\xff\xd9") - 2000])
+    add_asset(conn, "u2", path=deep)
+    run_hash(conn, workers=1)
+    b = conn.execute("SELECT blank_rows, flat FROM asset_hash WHERE uuid='u1'").fetchone()
+    assert (b["blank_rows"], b["flat"]) == (16, 1)
+    t = conn.execute("SELECT blank_rows, flat, status FROM asset_hash WHERE uuid='u2'").fetchone()
+    assert t["status"] == "truncated" and t["blank_rows"] > 0 and t["flat"] == 0

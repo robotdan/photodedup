@@ -100,7 +100,7 @@ def _load(conn: Connection) -> list[dict]:
         """
         SELECT m.set_id, a.uuid, a.original_filename, a.file_size, a.photos_date,
                a.date_added, a.thumb_path, a.uti, COALESCE(h.status, 'missing') AS hash_status,
-               h.phash, l.lost_on, l.carries
+               h.phash, h.blank_rows, h.flat, l.lost_on, l.carries
         FROM dup_set_member m
         JOIN asset a ON a.uuid = m.uuid
         LEFT JOIN asset_hash h ON h.uuid = a.uuid
@@ -170,7 +170,10 @@ def _render_set(
             f"<dt>bytes</dt><dd>{_e(m['file_size'])}</dd>"
             f"<dt>photos</dt><dd class='{_date_class(m, s, margin)}'>{_e(m['photos_date'] or 'missing')}</dd>"
             f"<dt>added</dt><dd>{_e(m['date_added'])}</dd>"
-            f"<dt>hash</dt><dd>{_e(m['hash_status'])}</dd>"
+            f"<dt>hash</dt><dd>{_e(m['hash_status'])}"
+            + (f" · {m['blank_rows']} blank rows" if m["blank_rows"] else "")
+            + (" · flat image" if m["flat"] else "")
+            + "</dd>"
             f"<dt>{'keeper' if is_keeper else ('lost on' if m['lost_on'] else 'kept')}</dt>"
             f"<dd>{'KEEP' if is_keeper else (_e(m['lost_on']) if m['lost_on'] else 'KEEP (edited)')}</dd>"
             + (f"<dt>carries</dt><dd>{_e(json.dumps(carries))}</dd>" if carries else "")
@@ -306,6 +309,10 @@ def write_review(
          [e for e in entries if has_flag(e, "truncated_member")][:sample]),
         ("size_spread", "Exact sets whose intact members differ by 1 MB or more",
          sorted([e for e in exact if has_flag(e, "size_spread")], key=lambda e: -spread(e))[:sample]),
+        ("partial", "Sets with a partially rendered member (fewest blank rows wins)",
+         [e for e in entries if has_flag(e, "partial_render")][:sample]),
+        ("blank", "Sets of flat, blank images (offer for deletion in Phase 4)",
+         [e for e in entries if has_flag(e, "blank_image")][:sample]),
         ("keeper_smaller", "Keeper smaller than an intact loser (must be empty)",
          [e for e in entries if has_flag(e, "keeper_smaller")]),
         ("candidate", "Candidate-only sets, closest phash first",
