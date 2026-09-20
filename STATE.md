@@ -28,6 +28,10 @@ Then record the numbers under "Phase 3 results" and compare them with the
 disagree by more than the prefix rule explains, stop and find out why
 before sampling.
 
+`group` will read on the order of a gigabyte during the prefix rule because
+seven damaged burst frames share their 4048x3036 dimensions with about
+1,200 other assets; that is expected, not a hang.
+
 ## Paths
 
 - Library: /Users/robotdan/Pictures/Photos Library.photoslibrary (65,974 assets)
@@ -360,6 +364,9 @@ What the reviews established, which the commit messages do not record:
   (`truncated`, `error`, `no_original`, `skipped`) ranks below an intact
   member for keeper purposes and raises a blocking `unhashed_member` flag
   rather than being silently preferred.
+- The final review measured the prefix rule against the real catalog and
+  found 9,679 partner candidates for the 15 truncated files; a 64 KB head
+  comparison now precedes any full-prefix read.
 
 ## Phase 4 obligations
 
@@ -371,6 +378,27 @@ correction.
 `review` refuses to run when `group` was re-run after `arbitrate`, because
 the decisions cascade away with the old sets. The fix is to re-run
 `arbitrate`, not to force past the refusal.
+
+`apply` must not write a capture date for any set whose `review_flags`
+contains `dates_disagree`, regardless of `resolvable`. `dates_disagree` is
+informational and does not block resolvability, but it means the earliest
+survivor won by rule alone and nobody has looked at it; writing that date
+back to Photos without a human glance defeats the point of the review step.
+
+`apply` must skip a resolvable decision that has no `decision_loser` rows.
+A set can shrink to one member between `arbitrate` and `apply` when an
+asset is deleted and the deletion cascades, leaving a decision with a
+keeper and nothing to lose. There is nothing to resolve in that case, and
+`apply` must not treat it as an error either.
+
+Stage dependencies are checked by status only, so re-running `hash` after
+`group` has already run leaves `group` reporting complete over groups that
+are now stale, and nothing downstream catches it: `require_stage_complete`
+sees "complete" and moves on. This is a structural gap Phase 4 should
+close. A generation counter on the `stage` table, compared by each later
+stage against the generation its inputs were built from, would close the
+whole class of "ran stage B, then re-ran its input A, and B never noticed"
+bugs at once.
 
 ## The number to watch
 
