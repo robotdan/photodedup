@@ -400,6 +400,32 @@ stage against the generation its inputs were built from, would close the
 whole class of "ran stage B, then re-ran its input A, and B never noticed"
 bugs at once.
 
+## Deferred minors from the Phase 3 reviews
+
+None of these changes a decision. Recorded so they are not lost; fix them
+when touching the file for another reason.
+
+- `review.write_review` marks the `review` stage running before the
+  output-directory guard runs, so a refused run leaves the stage as
+  `running` until the next successful run. Reorder the two calls.
+- `review._refuse_unsafe_out_dir` tests `review.css` with `exists()`, so a
+  directory of that name passes; use `is_file()`.
+- `arbitrate`: `commit()` sits outside the try; `set_stage` inside the
+  except can mask the original exception; `choose_keeper`'s ValueError
+  lacks the set id; `_added_ts` compares local-time epoch seconds (DST
+  fall-back can tie two `date_added` values an hour apart); `_has_caption`
+  counts a filename-echo title while `_caption_gain` ignores it; an
+  equal-length differing caption is dropped from `carries`.
+- `sets`: `dup_set.size` is written once and goes stale if an asset row is
+  later deleted; no test that the kind tripwire fires on the candidate
+  plan; the local variable `exact_components` shadows the report function.
+- `cli`: `SetsInconsistent` and `OSError` reach the user as tracebacks.
+- `grouping.prefix_groups`: the truncated side does not exclude
+  `MULTIFRAME_UTIS` (unreachable, since only a JPEG can be truncated).
+- Tests: two schema-version tests in `test_catalog.py`; five
+  `jpeg_is_truncated` tests use `tempfile` instead of `tmp_path`; no test of
+  the `thumb_path` refresh on a resumed survey.
+
 ## The number to watch
 
 The survey found 16,712 groups sharing an exact file size and pixel
