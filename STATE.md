@@ -16,27 +16,55 @@ Phase 4 is built but has not touched the real library. Everything from here
 runs in your own terminal, from the repo root (the agent shell cannot start
 Photos, script it, or start the process pool):
 
-    uv run photodedup apply --self-test <UUID of any one photo>   # proves the write path; restores the photo
-    uv run photodedup archive --limit 20                          # trial: 20 losers to the drive
-    uv run photodedup archive                                     # the rest; re-run until 0 mismatched, 0 missing
-    uv run photodedup apply                                       # prints the plan, writes nothing
-    uv run photodedup apply --dry-run --all --include-disagreeing-dates
+    uv run photodedup apply --self-test <UUID of a photo you do not care about>   # prints its title and date first, then restores them
+    uv run photodedup archive --limit 20            # trial
+    uv run photodedup archive                       # re-run until it reports 0 mismatched, 0 missing, stage complete
+    cp catalog.sqlite backups/catalog-after-archive.sqlite   # the catalog is no longer derived from here on
+    uv run photodedup apply                         # prints the plan, writes nothing
+    uv run photodedup apply --dry-run --all
     uv run photodedup apply --merge
+    uv run photodedup apply --dates                 # the 5 sets with no disagreement
+    # open reports/review/samples/dates.html and sample the flagged sets; if they look right:
     uv run photodedup apply --dates --include-disagreeing-dates
+    uv run photodedup verify                        # 0 keepers missing, 0 dates wrong, before staging
     uv run photodedup apply --stage
-    uv run photodedup verify                                      # before deleting: all losers present, 0 keepers missing
+    uv run photodedup verify                        # every staged loser present in its album
 
 Then, in Photos: open the folder "Dedup Delete", delete the contents of each
 album, and "Dedup Delete blank" after checking it; run `verify` again; empty
 Recently Deleted only after a clean verify, and only once you are done
 relying on the archive as a fallback.
 
+## Phase 4 numbers to expect
+
+`archive` copies 16,854 losers, about 62.5 GB, plus the 2 keepers of the
+blank-image sets, which are archived and gated exactly like losers because
+they end up in a delete album too. `apply --merge` touches 518 keepers.
+`apply --dates` corrects 5 by default and 61 with
+`--include-disagreeing-dates`. `apply --stage` fills `Dedup Delete 001`
+through `Dedup Delete 034` (33 albums of 500 and one of 354) plus `Dedup
+Delete blank` with 2 photos. The 2,241 and 108 the Phase 4 spec first
+quoted counted candidate-tier rows that `apply` excludes; the numbers above
+are the resolvable exact-tier population `apply` actually works on.
+
+After a deletion, `verify` reports staged losers sitting in Recently
+Deleted on their own line rather than as still present or as gone, so a
+successful deletion reads as a success for the full 30 days the photos stay
+recoverable.
+
+Once `archive` has run, `catalog.sqlite` STOPS being a derived artifact: it
+is the only record of which archived file belongs to which asset, and of
+every apply action and its `previous` value. Back it up after the archive
+run and after each apply step, and do not rebuild it without a copy.
+
 ## Paths
 
 - Library: /Users/robotdan/Pictures/Photos Library.photoslibrary (65,974 assets)
-- Catalog: ./catalog.sqlite — schema version 2, all 65,974 assets surveyed.
-  Gitignored and derived; rebuilding it is the correct answer to a schema
-  change, not something to work around.
+- Catalog: ./catalog.sqlite — schema version 4, all 65,974 assets surveyed.
+  Gitignored, and derived only until `archive` runs; rebuilding it is the
+  correct answer to a schema change up to that point, and after it the
+  archive and apply records live nowhere else. See "Phase 4 numbers to
+  expect".
 - Archive: /Volumes/Extreme Pro (unused so far)
 
 ## Everything is READ-ONLY
@@ -436,9 +464,10 @@ Ledger (gitignored, on disk):
 - [x] Task 3 — `apply.py` merge and date correction — `bc2c598`, fix `11c7af3`
 - [x] Task 4 — `apply.py` staging, `losers.csv`, self-test, and the `apply`
   CLI — `6359410`, fix `6f78539`
-- [x] Task 5 — `verify.py` and the `verify` CLI; this handoff — this commit
+- [x] Task 5 — `verify.py` and the `verify` CLI; this handoff — `2574a55`
+- [x] Whole-branch review fixes — `8954a5a`, plus this docs commit
 
-`uv run pytest -q` passes (393 tests). Not yet run against the real
+`uv run pytest -q` passes (409 tests). Not yet run against the real
 library; see "The one outstanding action" above.
 
 What the reviews established, which the commit messages do not record:
@@ -448,7 +477,9 @@ What the reviews established, which the commit messages do not record:
   real Photos session, which no headless test can see. A stand-in-module test now
   pins every API shape `photos_write.py` relies on, so a future photoscript
   release that changes a signature fails loudly in CI instead of quietly in
-  Photos.
+  Photos. The writer no longer enumerates an album at all: a Photos album is
+  a set, so `add` is already idempotent, and staging adds a whole album in
+  one call rather than 500.
 - The archive stage gate in `apply.require_archive` is what actually
   protects edited renders and Live Photo movies. `archive_file` coverage is
   checked for originals only, because edited renders and Live Photo movies

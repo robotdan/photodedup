@@ -50,6 +50,9 @@ in Photos and pressing delete, as the parent spec requires.
    `Dedup Delete 001` … of at most 500 assets, per the parent spec. The
    keepers of `blank_image` sets (flat images) go in a separate album
    `Dedup Delete blank`, so that the user can confirm those separately.
+   Those blank keepers are archived and gated exactly like losers: they end
+   up in a delete album too, so `apply` refuses to run while one of them
+   has no verified archive copy.
 7. A new catalog table may be added without a schema version bump when it
    is purely additive; `open_catalog` creates it on open. Changing an
    existing table still bumps the version and forces a rebuild. Phase 4
@@ -209,14 +212,21 @@ thing that touches a real library, and only the user runs it.
 
 ## Expected results on this library
 
-- `archive`: 16,854 originals, about 62.5 GB, plus edited renders and live
-  movies for losers that have them (few). Zero mismatches after retry.
-- `apply --merge`: 2,241 keepers touched.
-- `apply --dates`: 5 by default; 108 with `--include-disagreeing-dates`.
-- `apply --stage`: 34 albums of 500 plus one of 354, and `Dedup Delete
-  blank` with 2 keepers.
+- `archive`: 16,854 loser originals, about 62.5 GB, plus the 2 blank-image
+  keepers, plus edited renders and live movies for losers that have them
+  (few). Zero mismatches after retry.
+- `apply --merge`: 518 keepers touched.
+- `apply --dates`: 5 by default; 61 with `--include-disagreeing-dates`.
+- `apply --stage`: `Dedup Delete 001` through `034` — 33 albums of 500 and
+  one of 354 — and `Dedup Delete blank` with 2 keepers.
 - `verify` before deletion: all 16,854 losers present in their albums,
-  0 keepers missing, 0 date failures.
+  0 keepers missing, 0 date failures. After deletion they move to the
+  "in Recently Deleted" line, not to "gone", until the trash is emptied.
+
+The 2,241 merges and 108 date corrections quoted earlier in this document
+counted candidate-tier rows that `apply` excludes. `apply` works only on
+the resolvable exact tier, which is where the 518 and the 5 / 61 come
+from.
 
 ## Process
 
