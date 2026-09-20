@@ -449,6 +449,23 @@ What the reviews established, which the commit messages do not record:
   found 9,679 partner candidates for the 15 truncated files; a 64 KB head
   comparison now precedes any full-prefix read.
 
+## Phase 4 residuals from the final review (fix before a second library, fine for this run)
+
+- Staging adds each album's 500 photos in one call. If one uuid no longer
+  exists in Photos (a duplicate deleted by hand since the survey), that
+  whole batch records `failed` and retries fail the same way. The counts
+  are printed and `verify` shows those photos still present; the fix is a
+  per-uuid fallback pass when a batch raises. If `apply --stage` reports
+  failures, stop and ask before deleting anything.
+- The stand-in photoscript test asserts `Album.add` returns only newly
+  added photos; the real handler returns the whole requested list. No
+  caller depends on the return value.
+- `verify` checks a staged loser's presence but not that it is actually in
+  its album; `cli.py` marks the apply stage complete even with failures.
+- `archive` decides whether to look for edited renders and Live Photo
+  movies from the catalog's survey-time flags; an edit made after the
+  survey would not be archived. Zero losers have either flag today.
+
 ## Phase 4 progress
 
 Plan: `docs/superpowers/plans/2026-09-20-photo-dedup-phase4-archive-apply-verify.md`
