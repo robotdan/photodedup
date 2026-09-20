@@ -8,6 +8,7 @@ from pathlib import Path
 import click
 
 from photodedup.arbitrate import run_arbitrate
+from photodedup.archive import ArchiveSpace, run_archive
 from photodedup.catalog import (
     StageIncomplete,
     open_catalog,
@@ -28,6 +29,7 @@ from photodedup.survey import (
 
 DEFAULT_LIBRARY = Path.home() / "Pictures" / "Photos Library.photoslibrary"
 DEFAULT_CATALOG = Path("catalog.sqlite")
+DEFAULT_ARCHIVE = Path("/Volumes/Extreme Pro/photodedup")
 
 
 @click.group()
@@ -241,4 +243,28 @@ def review(
     click.echo(
         f"wrote {out / 'index.html'}: {result.sets} sets on {result.pages} pages, "
         f"{result.thumbs} thumbnails, {result.placeholders} placeholders"
+    )
+
+
+@main.command()
+@click.option(
+    "--catalog", type=click.Path(path_type=Path), default=DEFAULT_CATALOG, show_default=True
+)
+@click.option(
+    "--root", type=click.Path(path_type=Path), default=DEFAULT_ARCHIVE, show_default=True
+)
+@click.option("--limit", type=int, default=None, help="Copy at most this many losers, for a trial run.")
+def archive(catalog: Path, root: Path, limit: int | None) -> None:
+    """Copy every loser's original to the archive and verify it. Read-only against Photos; resumable."""
+    conn = open_catalog(catalog)
+    try:
+        result = run_archive(
+            conn, root, limit=limit,
+            progress=lambda done, total: click.echo(f"  {done}/{total}", err=True),
+        )
+    except (StageIncomplete, ArchiveSpace, LibraryUnavailable) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(
+        f"{result.copied} copied ({result.bytes} bytes), {result.skipped} already archived, "
+        f"{result.mismatched} mismatched (will retry), {result.missing} missing sources"
     )

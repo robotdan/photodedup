@@ -64,3 +64,9 @@ def test_sets_runs_on_grouped_catalog(catalog):
     assert "0 exact sets" in result.output
     conn = open_catalog(catalog)
     assert get_stage(conn, "sets")["status"] == "complete"
+
+
+def test_archive_refuses_before_arbitrate(catalog, tmp_path):
+    result = run("archive", "--catalog", str(catalog), "--root", str(tmp_path / "arc"))
+    assert result.exit_code != 0
+    assert "arbitrate stage" in result.output
