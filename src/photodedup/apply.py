@@ -415,11 +415,32 @@ def _album_name(index: int) -> str:
     return f"{FOLDER} {index:03d}"
 
 
-def run_stage(conn: Connection, writer: PhotosWriter, *, batch: int = BATCH, dry_run: bool = False, now: datetime | None = None) -> ApplyResult:
+NOT_IN_ALBUM = (
+    "not in the album after the add; Photos may have shown an 'add N photos' "
+    "prompt that was not confirmed in time. Re-run `apply --stage` and click "
+    "Apply when the prompt appears."
+)
+
+
+def run_stage(
+    conn: Connection,
+    writer: PhotosWriter,
+    *,
+    batch: int = BATCH,
+    dry_run: bool = False,
+    now: datetime | None = None,
+    membership: Callable[[list[str]], Mapping[str, set[str]]] | None = None,
+) -> ApplyResult:
     """Put every loser in a numbered album under the Dedup Delete folder.
 
-    Albums fill in order and a re-run continues in the first album that
-    still has room, so numbering never restarts and no loser is staged twice.
+    Every run opens fresh albums after the highest one ever used, so a photo
+    the user removed from an album by hand is never silently put back into
+    an album they have already dealt with, and no album ever exceeds
+    *batch*. Photos' scripted add reports success even when the add did not
+    take (its confirmation prompt was dismissed or timed out), so when
+    *membership* is given, a photo is recorded as staged only after the
+    library shows it inside its album; otherwise it is recorded failed and
+    retried next run.
     """
     require_archive(conn)
     losers, blank_keepers = _stage_population(conn)
@@ -429,16 +450,15 @@ def run_stage(conn: Connection, writer: PhotosWriter, *, batch: int = BATCH, dry
     if not dry_run:
         set_stage(conn, "apply", "running")
 
-    counts = _album_counts(conn)
     indices = []
-    for name in counts:
+    for r in conn.execute("SELECT detail FROM apply_action WHERE action = 'stage'"):
+        name = json.loads(r["detail"]).get("album") or ""
         try:
             indices.append(int(name.rsplit(" ", 1)[1]))
         except (ValueError, IndexError):
             continue
-    index = max(indices or [1])
-    while counts.get(_album_name(index), 0) >= batch:
-        index += 1
+    index = max(indices or [0]) + 1
+    counts: dict[str, int] = {}
 
     # Work out every album assignment first, then add each album's photos in
     # ONE call. Photos takes about as long to add 500 photos as one, and a
@@ -462,6 +482,7 @@ def run_stage(conn: Connection, writer: PhotosWriter, *, batch: int = BATCH, dry
                 batches.append((name, [uuid]))
             counts[name] = counts.get(name, 0) + 1
 
+        added: list[tuple[str, list[str]]] = []
         for name, uuids in batches:
             try:
                 writer.add_to_album(writer.ensure_album(name, folder=FOLDER), uuids)
@@ -472,9 +493,17 @@ def run_stage(conn: Connection, writer: PhotosWriter, *, batch: int = BATCH, dry
                     _record(conn, uuid, "stage", "failed", {"error": str(exc), "album": name}, None, now)
                 failed += len(uuids)
                 continue
+            added.append((name, uuids))
+
+        confirmed = membership([name for name, _ in added]) if (membership and added) else None
+        for name, uuids in added:
             for uuid in uuids:
-                _record(conn, uuid, "stage", "done", {"album": name}, None, now)
-            done += len(uuids)
+                if confirmed is None or uuid in confirmed.get(name, set()):
+                    _record(conn, uuid, "stage", "done", {"album": name}, None, now)
+                    done += 1
+                else:
+                    _record(conn, uuid, "stage", "failed", {"error": NOT_IN_ALBUM, "album": name}, None, now)
+                    failed += 1
 
     for uuid in blank_keepers:
         if uuid in done_blank:

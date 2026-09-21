@@ -22,7 +22,7 @@ from photodedup.catalog import (
 )
 from photodedup.grouping import HashStageIncomplete, run_group
 from photodedup.hash_stage import HashStageInterrupted, run_hash
-from photodedup.library import LibraryUnavailable, iter_assets, read_states
+from photodedup.library import LibraryUnavailable, album_members, iter_assets, read_states
 from photodedup.photos_write import PhotosUnavailable, PhotoscriptWriter
 from photodedup.report import duplicate_report, survey_report
 from photodedup.review import write_review
@@ -352,7 +352,17 @@ def apply(catalog: Path, do_merge: bool, do_dates: bool, do_stage: bool, do_all:
             click.echo(line)
             notes.append(line)
         if do_stage:
-            r = run_stage(conn, writer, batch=batch, dry_run=dry_run)
+            run_row = get_run(conn)
+            library = Path(run_row["library_path"]) if run_row else None
+
+            def membership(names: list[str]) -> dict:
+                # What Photos' own database says is in each album.
+                return album_members(library, names)
+
+            r = run_stage(
+                conn, writer, batch=batch, dry_run=dry_run,
+                membership=membership if (library and not dry_run) else None,
+            )
             line = f"stage: {r.done} done, {r.failed} failed, {r.skipped} already done"
             if not dry_run:
                 n = write_losers_csv(conn, losers_csv)

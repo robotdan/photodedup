@@ -227,6 +227,25 @@ def read_states(library_path: Path, uuids: Iterable[str]) -> dict[str, AssetStat
     return _read_states_from_db(_open_db(library_path), uuids)
 
 
+def _album_members_from_db(db: object, names: Iterable[str]) -> dict[str, set[str]]:
+    wanted = set(names)
+    out: dict[str, set[str]] = {name: set() for name in wanted}
+    for album in getattr(db, "album_info", []):
+        if album.title in wanted:
+            out[album.title] |= {p.uuid for p in album.photos}
+    return out
+
+
+def album_members(library_path: Path, names: Iterable[str]) -> dict[str, set[str]]:
+    """uuids currently in each named album, as Photos' database has it. Read-only.
+
+    Same-named albums (photoscript's kill-and-relaunch recovery can leave
+    duplicates in different folders) are merged, because what matters to the
+    caller is whether the photo sits in an album of that name at all.
+    """
+    return _album_members_from_db(_open_db(library_path), names)
+
+
 def _iter_paths_from_db(db: object) -> Iterator[AssetPaths]:
     for photo in db.photos(movies=True, intrash=False):
         yield AssetPaths(

@@ -313,10 +313,11 @@ def test_stage_resumes_without_reshuffling(staged):
     add_set(staged, 9, ["k9", "l9"]); run_arbitrate(staged, now=NOW); archived(staged, "l9")
     fake.photos["k9"] = fake.photos["l9"] = {"title": "", "description": "", "keywords": [], "favorite": False, "date": None}
     # arbitrate rewrote decisions but apply_action rows survive; the new loser
-    # lands in the next partial album.
+    # lands in a fresh album, never in one the user may already have emptied.
     result = run_stage(staged, fake, batch=3, now=NOW)
     assert (result.done, result.skipped) == (1, 9)
-    assert fake.album_members("Dedup Delete 003", FOLDER) == ["l5", "l6", "l9"]
+    assert fake.album_members("Dedup Delete 003", FOLDER) == ["l5", "l6"]
+    assert fake.album_members("Dedup Delete 004", FOLDER) == ["l9"]
 
 
 def test_stage_never_stages_a_keeper_or_a_candidate(staged):
@@ -561,3 +562,55 @@ def test_redo_reapplies_done_dates_and_keeps_the_original_previous(dated):
     assert result.done == 1 and result.skipped == 0
     row = dated.execute("SELECT previous FROM apply_action WHERE uuid='k1'").fetchone()
     assert json.loads(row["previous"]) == {"date": "2020-12-18T09:10:00"}
+
+
+# --- staging is confirmed against the library ------------------------------
+
+
+def _membership_from(fake):
+    def membership(names):
+        return {n: set(fake.album_members(n, FOLDER)) | set(fake.album_members(n)) for n in names}
+    return membership
+
+
+def test_stage_records_done_only_when_the_library_shows_the_photo(staged):
+    fake = fake_for(staged)
+    result = run_stage(staged, fake, batch=3, now=NOW, membership=_membership_from(fake))
+    assert (result.done, result.failed) == (9, 0)
+
+
+def test_stage_records_failed_when_the_add_did_not_take(staged):
+    class LyingPhotos(FakePhotos):
+        """Photos' albumAdd returns the requested ids even when nothing was added."""
+
+        def add_to_album(self, album_id, uuids):
+            return list(uuids)
+
+    fake = LyingPhotos({r["uuid"]: {} for r in staged.execute("SELECT uuid FROM asset")})
+    result = run_stage(staged, fake, batch=3, now=NOW, membership=_membership_from(fake))
+    assert result.done == 1   # only the blank keeper path, which is unverified
+    assert result.failed == 8
+    row = staged.execute("SELECT status, detail FROM apply_action WHERE uuid='l0'").fetchone()
+    assert row["status"] == "failed" and "prompt" in json.loads(row["detail"])["error"]
+    # The retry goes into fresh albums and, with an honest writer, succeeds.
+    honest = fake_for(staged)
+    again = run_stage(staged, honest, batch=3, now=NOW, membership=_membership_from(honest))
+    assert again.done == 8 and again.failed == 0
+    names = {json.loads(r["detail"])["album"] for r in staged.execute(
+        "SELECT detail FROM apply_action WHERE action='stage' AND status='done'")}
+    assert names and min(names) >= "Dedup Delete 004"
+
+
+def test_stage_never_tops_up_an_existing_album(staged):
+    fake = fake_for(staged)
+    run_stage(staged, fake, batch=3, now=NOW)
+    staged.execute("DELETE FROM apply_action WHERE uuid IN ('l0', 'l1')")
+    staged.commit()
+    run_stage(staged, fake, batch=3, now=NOW)
+    albums = {json.loads(r["detail"])["album"]: r["uuid"] for r in staged.execute(
+        "SELECT detail, uuid FROM apply_action WHERE uuid IN ('l0','l1')")}
+    assert set(albums) == {"Dedup Delete 004"}
+    from collections import Counter
+    sizes = Counter(json.loads(r["detail"])["album"] for r in staged.execute(
+        "SELECT detail FROM apply_action WHERE action='stage' AND status='done'"))
+    assert max(sizes.values()) <= 3

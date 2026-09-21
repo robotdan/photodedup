@@ -216,3 +216,21 @@ def test_iter_paths_reads_edited_and_live_paths():
             return [Photo()]
 
     assert list(_iter_paths_from_db(DB())) == [AssetPaths("a", "/lib/a.jpg", "/lib/a_edited.jpg", None)]
+
+
+def test_album_members_merges_same_named_albums():
+    from photodedup.library import _album_members_from_db
+
+    class P:
+        def __init__(self, uuid):
+            self.uuid = uuid
+
+    class A:
+        def __init__(self, title, uuids):
+            self.title, self.photos = title, [P(u) for u in uuids]
+
+    class DB:
+        album_info = [A("Dedup Delete 001", ["a", "b"]), A("Dedup Delete 001", ["c"]), A("Other", ["z"])]
+
+    got = _album_members_from_db(DB(), ["Dedup Delete 001", "Dedup Delete 002"])
+    assert got == {"Dedup Delete 001": {"a", "b", "c"}, "Dedup Delete 002": set()}
