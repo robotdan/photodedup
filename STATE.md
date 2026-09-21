@@ -514,6 +514,28 @@ fallback. `catalog.sqlite` now holds the only record of previous dates and
 the apply history; keep `backups/catalog-after-archive.sqlite` and back up
 the current file too.
 
+## After Phase 4: Photos' own Duplicates feature (2026-09-21)
+
+The user ran Photos' Duplicates merge over the look-alike tier this tool
+left alone. Checked against the catalog: Photos' merge carried albums,
+favorites and keywords to every survivor, never kept a smaller or
+unedited copy, and its surviving dates matched ours in all but one case
+(an animated GIF the user fixed by hand). Before the final Select All
+merge, the 52 look-alike sets whose members disagreed on date were
+reviewed on `reports/review/samples/lookalike_dates.html` and every
+member was written the arbitrated date with `apply --dates --sets ...`
+(commit `9fe8e2e`), so the merge could keep any copy.
+
+Two consequences to know. `verify` now reports keepers "missing" for the
+278 exact-set keepers Photos merged away in favour of an identical twin;
+270 have a surviving twin in the library. Eight do not, because Photos
+merged them with copies already in the trash and kept none: IMGP3133,
+IMG_20120830_081045, P1040788, IMG_20120817_192731, P1050736,
+IMG_20120310_150332, IMG_20120902_183415, IMG_20140404_104724891-edited.
+They sit in Recently Deleted for the user to Recover; byte-identical
+twins are in the archive as well. Photos' merge also included the Shared
+Library copies the tool could not stage.
+
 ## Phase 4 progress
 
 Plan: `docs/superpowers/plans/2026-09-20-photo-dedup-phase4-archive-apply-verify.md`
