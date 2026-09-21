@@ -1,8 +1,8 @@
 # Photo De-duplication — Working State
 
 **Last updated:** 2026-09-20
-**Current phase:** Phase 4 (archive, apply, verify) — run against the real
-library through staging and verified; the user is deleting the staged albums.
+**Current phase:** Phase 4 COMPLETE (2026-09-21). 16,604 duplicates deleted
+to Recently Deleted; 250 Shared Library copies left in place, tagged.
 **Branch:** `main`
 **Spec:** docs/superpowers/specs/2026-09-18-photo-dedup-design.md (binding authority)
 **Phase 2 plan:** docs/superpowers/plans/2026-09-19-photo-dedup-phase2-hash-group.md
@@ -485,6 +485,34 @@ the user deletes them by hand). Verify before deletion: 16,854 losers
 present in their albums, 0 in Recently Deleted, 0 keepers missing, 0 dates
 wrong, 0 staged photos no longer losers. Deletion in Photos is the next
 step, followed by `verify`.
+
+## Phase 4 outcome (2026-09-21)
+
+Final verify: 0 losers still present, 16,604 in Recently Deleted, 0 keepers
+missing, 0 dates wrong. Two things learned during deletion, both now in the
+code: Photos' scripted album add returns success even when the add did not
+take, so `apply --stage` confirms membership against Photos' database
+before recording anything (`1aa8319`), and retries go into fresh albums;
+Photos shows an "add N photos" confirmation for adds above roughly 50 and
+sometimes drops the add even when it is confirmed, so batches of 50 are
+the reliable size. Inside an album the plain Delete key only removes the
+photo from the album; deleting requires Command-Delete. The simplest
+deletion path turned out to be a keyword: tag the staged photos
+`dedup-staged` (one scripted call each, never prompts), search Photos for
+the keyword, select all, Command-Delete.
+
+Not deleted, on purpose: 250 losers that live in the iCloud Shared
+Library (240) or shared albums (10). Photos refuses scripted album adds
+for them. They carry the keyword `dedup-delete`, their keepers are in the
+personal library, and deleting them would remove them from the family's
+view; the user chose to leave them for now. They are in `losers.csv` and
+archived like every other loser.
+
+Left for the user: delete the empty `Dedup Delete` folder(s) and albums;
+empty Recently Deleted only when done relying on the archive as the
+fallback. `catalog.sqlite` now holds the only record of previous dates and
+the apply history; keep `backups/catalog-after-archive.sqlite` and back up
+the current file too.
 
 ## Phase 4 progress
 
