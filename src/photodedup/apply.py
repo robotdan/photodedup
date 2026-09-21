@@ -230,7 +230,32 @@ def run_merge(conn: Connection, writer: PhotosWriter, *, dry_run: bool = False, 
 # --- dates -----------------------------------------------------------------
 
 
-def date_targets(conn: Connection, *, include_disagreeing: bool) -> list[DateTarget]:
+def date_targets(
+    conn: Connection, *, include_disagreeing: bool, sets: Sequence[int] | None = None
+) -> list[DateTarget]:
+    """Keepers whose arbitrated date should be written.
+
+    With *sets*, every member of those sets (any tier) is a target for the
+    set's arbitrated date, disagreement flag ignored: the user has reviewed
+    those sets by eye and wants each copy to carry the same date before
+    Photos merges them, so whichever copy survives is right.
+    """
+    if sets:
+        placeholders = ", ".join("?" * len(sets))
+        rows = conn.execute(
+            f"""
+            SELECT d.set_id, m.uuid AS keeper_uuid, d.date_value, d.review_flags
+            FROM decision d JOIN dup_set_member m ON m.set_id = d.set_id
+            WHERE d.set_id IN ({placeholders}) AND d.date_value IS NOT NULL
+            ORDER BY d.set_id, m.uuid
+            """,
+            list(sets),
+        ).fetchall()
+        return [
+            DateTarget(r["keeper_uuid"], r["set_id"], datetime.fromisoformat(r["date_value"]),
+                       "dates_disagree" in (r["review_flags"] or "").split(","))
+            for r in rows
+        ]
     rows = conn.execute(
         """
         SELECT d.set_id, d.keeper_uuid, d.date_value, d.review_flags
@@ -261,6 +286,7 @@ def run_dates(
     now: datetime | None = None,
     displayed: Callable[[list[str]], Mapping[str, datetime | None]] | None = None,
     redo: bool = False,
+    sets: Sequence[int] | None = None,
 ) -> ApplyResult:
     """Write each keeper's arbitrated date and make sure Photos DISPLAYS it.
 
@@ -281,7 +307,7 @@ def run_dates(
         set_stage(conn, "apply", "running")
     # uuid -> (target, previous, value currently written)
     pending: dict[str, tuple[DateTarget, dict | None, datetime]] = {}
-    for target in date_targets(conn, include_disagreeing=include_disagreeing):
+    for target in date_targets(conn, include_disagreeing=include_disagreeing, sets=sets):
         if target.keeper in done_before:
             skipped += 1
             continue

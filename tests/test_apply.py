@@ -614,3 +614,16 @@ def test_stage_never_tops_up_an_existing_album(staged):
     sizes = Counter(json.loads(r["detail"])["album"] for r in staged.execute(
         "SELECT detail FROM apply_action WHERE action='stage' AND status='done'"))
     assert max(sizes.values()) <= 3
+
+
+def test_dates_for_named_sets_target_every_member_regardless_of_flags(dated):
+    targets = date_targets(dated, include_disagreeing=False, sets=[2])
+    assert sorted(t.keeper for t in targets) == ["k2", "l2"]
+    assert all(t.value == datetime(2014, 1, 1, 0, 0, 0) for t in targets)
+
+
+def test_run_dates_with_sets_writes_every_member(dated):
+    fake = fake_for(dated)
+    result = run_dates(dated, fake, now=NOW, sets=[2], displayed=_displayed_from(fake))
+    assert (result.done, result.failed) == (2, 0)
+    assert fake.get("k2").date == fake.get("l2").date == datetime(2014, 1, 1, 0, 0, 0)
