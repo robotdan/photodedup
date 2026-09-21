@@ -502,3 +502,62 @@ def test_self_test_refuses_a_photo_with_no_capture_date_before_touching_it():
     assert "no capture date" in str(exc.value)
     assert fake.albums == {}
     assert fake.calls == []
+
+
+# --- displayed-date correction ---------------------------------------------
+
+
+def _displayed_from(fake, skew_hours=0):
+    from datetime import timedelta
+
+    def displayed(uuids):
+        return {u: (fake.get(u).date + timedelta(hours=skew_hours)) if fake.get(u).date else None for u in uuids}
+
+    return displayed
+
+
+def test_dates_done_when_displayed_matches(dated):
+    fake = fake_for(dated)
+    result = run_dates(dated, fake, include_disagreeing=True, now=NOW, displayed=_displayed_from(fake))
+    assert (result.done, result.failed) == (2, 0)
+    d = json.loads(dated.execute("SELECT detail FROM apply_action WHERE uuid='k1'").fetchone()["detail"])
+    assert d["date"] == "2014-05-12T17:00:00" and d["corrections"] == 0
+
+
+def test_dates_correct_a_one_hour_display_drift(dated):
+    """Photos shows the written time an hour early; the second write shifts
+    an hour late so the shown time lands where the catalog wants it."""
+    from datetime import timedelta
+
+    fake = fake_for(dated)
+    result = run_dates(dated, fake, now=NOW, displayed=_displayed_from(fake, skew_hours=-1))
+    assert (result.done, result.failed) == (1, 0)
+    assert fake.get("k1").date == datetime(2014, 5, 12, 18, 0, 0)
+    d = json.loads(dated.execute("SELECT detail FROM apply_action WHERE uuid='k1'").fetchone()["detail"])
+    assert d["date"] == "2014-05-12T17:00:00" and d["written"] == "2014-05-12T18:00:00" and d["corrections"] == 1
+
+
+def test_dates_give_up_when_display_never_converges(dated):
+    from datetime import timedelta
+
+    fake = fake_for(dated)
+
+    def wandering(uuids):
+        # Whatever is written, Photos shows the same unrelated date, so no
+        # shift can ever land the wanted value.
+        return {u: datetime(1999, 1, 1, 0, 0, 0) for u in uuids}
+
+    result = run_dates(dated, fake, now=NOW, displayed=wandering)
+    assert (result.done, result.failed) == (0, 1)
+    row = dated.execute("SELECT status, detail FROM apply_action WHERE uuid='k1'").fetchone()
+    assert row["status"] == "failed" and "displayed" in json.loads(row["detail"])
+
+
+def test_redo_reapplies_done_dates_and_keeps_the_original_previous(dated):
+    fake = fake_for(dated)
+    run_dates(dated, fake, now=NOW)
+    fake.photos["k1"]["date"] = datetime(2014, 5, 12, 16, 0, 0)   # what verify found: an hour off
+    result = run_dates(dated, fake, now=NOW, displayed=_displayed_from(fake, skew_hours=-1), redo=True)
+    assert result.done == 1 and result.skipped == 0
+    row = dated.execute("SELECT previous FROM apply_action WHERE uuid='k1'").fetchone()
+    assert json.loads(row["previous"]) == {"date": "2020-12-18T09:10:00"}

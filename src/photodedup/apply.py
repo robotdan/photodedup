@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from sqlite3 import Connection
@@ -248,12 +249,38 @@ def date_targets(conn: Connection, *, include_disagreeing: bool) -> list[DateTar
     return out
 
 
-def run_dates(conn: Connection, writer: PhotosWriter, *, include_disagreeing: bool = False, dry_run: bool = False, now: datetime | None = None) -> ApplyResult:
+DATE_CORRECTION_ROUNDS = 3
+
+
+def run_dates(
+    conn: Connection,
+    writer: PhotosWriter,
+    *,
+    include_disagreeing: bool = False,
+    dry_run: bool = False,
+    now: datetime | None = None,
+    displayed: Callable[[list[str]], Mapping[str, datetime | None]] | None = None,
+    redo: bool = False,
+) -> ApplyResult:
+    """Write each keeper's arbitrated date and make sure Photos DISPLAYS it.
+
+    Photos interprets a scripted date in the system's zone and then rewrites
+    the photo's own zone offset, so the wall-clock time it shows can land an
+    hour away from what was written, while a read-back through the same
+    scripting interface agrees with the write and cannot see the drift.
+    *displayed* reads the shown date the way `verify` does (through
+    osxphotos); when given, a date counts as done only when the displayed
+    value matches, and any drift is corrected by re-writing shifted by the
+    drift, up to DATE_CORRECTION_ROUNDS times. *redo* re-applies dates that
+    were already recorded done, for a run whose verify found them wrong.
+    """
     require_archive(conn)
-    done_before = _done(conn, "date")
+    done_before = set() if redo else _done(conn, "date")
     done = failed = skipped = 0
     if not dry_run:
         set_stage(conn, "apply", "running")
+    # uuid -> (target, previous, value currently written)
+    pending: dict[str, tuple[DateTarget, dict | None, datetime]] = {}
     for target in date_targets(conn, include_disagreeing=include_disagreeing):
         if target.keeper in done_before:
             skipped += 1
@@ -269,17 +296,61 @@ def run_dates(conn: Connection, writer: PhotosWriter, *, include_disagreeing: bo
             _record(conn, target.keeper, "date", "failed", {"in_progress": True}, previous, now)
             writer.set_date(target.keeper, target.value)
             after = writer.get(target.keeper).date
-            if after is not None and abs((after - target.value).total_seconds()) <= 1:
-                _record(conn, target.keeper, "date", "done", {"date": target.value.isoformat()}, previous, now)
-                done += 1
-            else:
+            if after is None or abs((after - target.value).total_seconds()) > 1:
                 _record(conn, target.keeper, "date", "failed",
                         {"wanted": target.value.isoformat(), "read_back": after.isoformat() if after else None},
                         previous, now)
                 failed += 1
+                continue
+            if displayed is None:
+                _record(conn, target.keeper, "date", "done", {"date": target.value.isoformat()}, previous, now)
+                done += 1
+            else:
+                pending[target.keeper] = (target, previous, target.value)
         except Exception as exc:
             _record(conn, target.keeper, "date", "failed", {"error": str(exc)}, previous, now)
             failed += 1
+
+    rounds = 0
+    while pending and rounds < DATE_CORRECTION_ROUNDS:
+        rounds += 1
+        shown = displayed(sorted(pending))
+        for uuid in sorted(pending):
+            target, previous, written = pending[uuid]
+            seen = shown.get(uuid)
+            if seen is not None and abs((seen - target.value).total_seconds()) <= 1:
+                _record(conn, uuid, "date", "done",
+                        {"date": target.value.isoformat(), "written": written.isoformat(),
+                         "corrections": rounds - 1}, previous, now)
+                done += 1
+                del pending[uuid]
+                continue
+            if seen is None:
+                continue
+            try:
+                # Photos showed `seen` for `written`; shift the write by the
+                # same amount in the other direction.
+                corrected = written + (target.value - seen)
+                writer.set_date(uuid, corrected)
+                pending[uuid] = (target, previous, corrected)
+            except Exception as exc:
+                _record(conn, uuid, "date", "failed", {"error": str(exc)}, previous, now)
+                failed += 1
+                del pending[uuid]
+    if pending:
+        shown = displayed(sorted(pending))
+        for uuid, (target, previous, written) in pending.items():
+            seen = shown.get(uuid)
+            if seen is not None and abs((seen - target.value).total_seconds()) <= 1:
+                _record(conn, uuid, "date", "done",
+                        {"date": target.value.isoformat(), "written": written.isoformat(),
+                         "corrections": rounds}, previous, now)
+                done += 1
+            else:
+                _record(conn, uuid, "date", "failed",
+                        {"wanted": target.value.isoformat(), "written": written.isoformat(),
+                         "displayed": seen.isoformat() if seen else None}, previous, now)
+                failed += 1
     return ApplyResult(done, failed, skipped)
 
 

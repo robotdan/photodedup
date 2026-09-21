@@ -13,6 +13,7 @@ from photodedup.apply import (
 from photodedup.arbitrate import run_arbitrate
 from photodedup.archive import ArchiveDestination, ArchiveSpace, run_archive
 from photodedup.catalog import (
+    get_run,
     StageIncomplete,
     get_stage,
     open_catalog,
@@ -21,7 +22,7 @@ from photodedup.catalog import (
 )
 from photodedup.grouping import HashStageIncomplete, run_group
 from photodedup.hash_stage import HashStageInterrupted, run_hash
-from photodedup.library import LibraryUnavailable, iter_assets
+from photodedup.library import LibraryUnavailable, iter_assets, read_states
 from photodedup.photos_write import PhotosUnavailable, PhotoscriptWriter
 from photodedup.report import duplicate_report, survey_report
 from photodedup.review import write_review
@@ -292,6 +293,7 @@ def archive(catalog: Path, root: Path, limit: int | None) -> None:
 @click.option("--catalog", type=click.Path(path_type=Path), default=DEFAULT_CATALOG, show_default=True)
 @click.option("--merge", "do_merge", is_flag=True, help="Merge loser albums, keywords, favorite and captions onto keepers.")
 @click.option("--dates", "do_dates", is_flag=True, help="Correct keeper capture dates.")
+@click.option("--redo-dates", is_flag=True, help="Re-apply dates already recorded done (after a verify found them wrong).")
 @click.option("--stage", "do_stage", is_flag=True, help="Put losers in 'Dedup Delete' albums and write losers.csv.")
 @click.option("--all", "do_all", is_flag=True, help="merge, dates, stage in that order.")
 @click.option("--include-disagreeing-dates", is_flag=True, help="Also correct dates in sets flagged dates_disagree (sampled by you).")
@@ -303,7 +305,7 @@ def archive(catalog: Path, root: Path, limit: int | None) -> None:
 )
 @click.option("--self-test", "test_uuid", default=None, help="UUID of one existing photo: prove the write path on it and restore it.")
 def apply(catalog: Path, do_merge: bool, do_dates: bool, do_stage: bool, do_all: bool,
-          include_disagreeing_dates: bool, dry_run: bool, batch: int, losers_csv: Path,
+          include_disagreeing_dates: bool, dry_run: bool, batch: int, losers_csv: Path, redo_dates: bool,
           test_uuid: str | None) -> None:
     """Apply the decisions to Photos. Never deletes anything. Interactive terminal only."""
     conn = open_catalog(catalog)
@@ -335,7 +337,17 @@ def apply(catalog: Path, do_merge: bool, do_dates: bool, do_stage: bool, do_all:
             click.echo(line)
             notes.append(line)
         if do_dates:
-            r = run_dates(conn, writer, include_disagreeing=include_disagreeing_dates, dry_run=dry_run)
+            run_row = get_run(conn)
+            library = Path(run_row["library_path"]) if run_row else None
+
+            def displayed(uuids: list[str]) -> dict:
+                # The date Photos SHOWS, read the way `verify` reads it.
+                return {u: s.date for u, s in read_states(library, uuids).items()}
+
+            r = run_dates(
+                conn, writer, include_disagreeing=include_disagreeing_dates, dry_run=dry_run,
+                displayed=displayed if (library and not dry_run) else None, redo=redo_dates,
+            )
             line = f"dates: {r.done} done, {r.failed} failed, {r.skipped} already done"
             click.echo(line)
             notes.append(line)
