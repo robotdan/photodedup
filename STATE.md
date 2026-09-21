@@ -1,8 +1,8 @@
 # Photo De-duplication — Working State
 
 **Last updated:** 2026-09-20
-**Current phase:** Phase 4 (archive, apply, verify) — BUILD COMPLETE at HEAD;
-self-test and archive not yet run.
+**Current phase:** Phase 4 (archive, apply, verify) — run against the real
+library through staging and verified; the user is deleting the staged albums.
 **Branch:** `main`
 **Spec:** docs/superpowers/specs/2026-09-18-photo-dedup-design.md (binding authority)
 **Phase 2 plan:** docs/superpowers/plans/2026-09-19-photo-dedup-phase2-hash-group.md
@@ -465,6 +465,26 @@ What the reviews established, which the commit messages do not record:
 - `archive` decides whether to look for edited renders and Live Photo
   movies from the catalog's survey-time flags; an edit made after the
   survey would not be archived. Zero losers have either flag today.
+
+## Phase 4 results (real run, 2026-09-20)
+
+Self-test passed with an exact date round-trip. Archive: 16,856 files,
+62.5 GB, 0 mismatched, 0 missing, stage complete; catalog backed up to
+`backups/catalog-after-archive.sqlite`. Merge: 518 done, 0 failed. Dates:
+the first pass recorded all 61 as done but `verify` found 55 displayed an
+hour early, because Photos interprets a scripted date in the system zone
+and then rewrites the photo's own zone offset; commit `c381667` made
+`apply --dates` re-read the displayed date through osxphotos and shift the
+write by the drift, and `--redo-dates` re-applied all 61 (61 done, 0
+failed, verify 0 wrong). Stage: 16,856 done (16,854 losers in albums
+`Dedup Delete 001` through `034`, 2 blank keepers in `Dedup Delete blank`),
+0 failed; a 500-photo album add exceeds AppleScript's two-minute limit,
+which photoscript recovers from by killing and relaunching Photos, and each
+recovery left an empty duplicate "Dedup Delete" folder behind (harmless;
+the user deletes them by hand). Verify before deletion: 16,854 losers
+present in their albums, 0 in Recently Deleted, 0 keepers missing, 0 dates
+wrong, 0 staged photos no longer losers. Deletion in Photos is the next
+step, followed by `verify`.
 
 ## Phase 4 progress
 
