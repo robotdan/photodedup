@@ -279,22 +279,30 @@ def date_targets(
 def stale_date_targets(
     conn: Connection, *, margin: timedelta = DEFAULT_DISAGREEMENT_MARGIN
 ) -> list[DateTarget]:
-    """Keepers whose recorded-done date the current date rules no longer choose.
+    """Keepers whose date was written, or attempted, under rules that no
+    longer choose it.
 
-    A date counts as current when it agrees with today's choice for any set
-    the keeper belongs to, exact or look-alike. Re-runs the date choice for each such keeper's set with today's rules. When
-    the new choice sits within *margin* of the keeper's own catalog date, the
-    keeper never needed a correction and gets its original date back;
-    otherwise it gets the new choice. Decisions are not rewritten.
+    A done date counts as current when it agrees with today's choice for any
+    set the keeper belongs to, exact or look-alike. A failed attempt (an
+    interrupted run, a Photos error) has no confirmed date, so it is judged by
+    the decision it was trying to write: a keeper whose decision date today's
+    rules reject is a target whatever state the interrupted write left it in.
+    Without this, an interrupted restore would drop out of the next one.
+
+    When the new choice sits within *margin* of the keeper's own catalog
+    date, the keeper never needed a correction and gets its original date
+    back; otherwise it gets the new choice. Decisions are not rewritten.
     """
     rows = conn.execute(
         """
-        SELECT x.uuid, x.detail, m.set_id, a.photos_date, d.review_flags
+        SELECT x.uuid, x.status, x.detail, m.set_id, a.photos_date, d.review_flags,
+               d.date_value
         FROM apply_action x
         JOIN asset a ON a.uuid = x.uuid
         JOIN dup_set_member m ON m.uuid = x.uuid AND m.tier = 'exact'
         JOIN decision d ON d.set_id = m.set_id
-        WHERE x.action = 'date' AND x.status = 'done'
+        WHERE x.action = 'date'
+          AND (x.status = 'done' OR (x.status = 'failed' AND d.keeper_uuid = x.uuid))
         ORDER BY x.uuid
         """
     ).fetchall()
@@ -303,6 +311,17 @@ def stale_date_targets(
 
     out = []
     for r in rows:
+        if r["status"] == "failed":
+            if r["date_value"] is None:
+                continue
+            choice = choice_for(r["set_id"])
+            if choice is None or abs(choice - datetime.fromisoformat(r["date_value"])) <= margin:
+                continue   # an ordinary failure; plain --dates retries it
+            original = datetime.fromisoformat(r["photos_date"]) if r["photos_date"] else None
+            value = original if original is not None and abs(choice - original) <= margin else choice
+            out.append(DateTarget(r["uuid"], r["set_id"], value,
+                                  "dates_disagree" in (r["review_flags"] or "").split(",")))
+            continue
         written = datetime.fromisoformat(json.loads(r["detail"])["date"])
         # A date written from a reviewed look-alike set (`--sets`) is current
         # as long as that set's choice still agrees with it.

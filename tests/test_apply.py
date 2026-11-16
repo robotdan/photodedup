@@ -687,3 +687,26 @@ def test_stale_targets_keep_a_date_written_from_a_reviewed_look_alike_set(conn):
     )
     conn.commit()
     assert stale_date_targets(conn) == []
+
+
+def test_an_interrupted_restore_stays_a_target(shifted):
+    """Photos dropped the connection mid-restore: the row is failed, the
+    photo may hold either date, and the next --fix-stale-dates must retry it."""
+    shifted.execute(
+        "UPDATE apply_action SET status='failed', detail=? WHERE uuid='k' AND action='date'",
+        (json.dumps({"error": "Connection is invalid. (-609)"}),),
+    )
+    # The real catalog's decision was made under the old rule.
+    shifted.execute("UPDATE decision SET date_value='1946-04-21T14:23:10' WHERE set_id=1")
+    shifted.commit()
+    [t] = stale_date_targets(shifted)
+    assert (t.keeper, t.value) == ("k", datetime(2012, 4, 21, 14, 15, 37))
+
+
+def test_an_ordinary_failed_date_is_not_a_stale_target(dated):
+    dated.execute(
+        """INSERT INTO apply_action (uuid, action, status, detail, previous, applied_at)
+           VALUES ('k1', 'date', 'failed', '{"error": "x"}', NULL, 'then')"""
+    )
+    dated.commit()
+    assert stale_date_targets(dated) == []
