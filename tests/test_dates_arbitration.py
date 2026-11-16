@@ -337,3 +337,27 @@ def test_choose_date_is_the_one_pool_case():
     single = choose_date(candidates, date_added=ADDED, file_mtime=MTIME, now=NOW)
     pooled = choose_date_pooled([Pool(tuple(candidates), ADDED, MTIME)], now=NOW)
     assert single == pooled
+
+
+def _pool(*candidates):
+    return Pool(tuple(candidates), ADDED, MTIME)
+
+
+def test_quicktime_epoch_shifted_date_loses_to_the_date_it_shadows():
+    """VID_20120421_161537: one copy's Photos date read 1946, exactly the
+    1904-to-1970 gap before the other copy's correct 2012 date."""
+    keeper = _pool(Candidate("photos_db", datetime(2012, 4, 21, 14, 15, 37)))
+    loser = _pool(Candidate("photos_db", datetime(1946, 4, 21, 14, 23, 10)))
+    decision = choose_date_pooled([keeper, loser], now=NOW)
+    assert decision.value == datetime(2012, 4, 21, 14, 15, 37)
+    assert ("photos_db", "epoch_shift") in decision.rejected
+    assert not decision.needs_review
+
+
+def test_an_old_date_with_no_shifted_twin_survives():
+    decision = choose_date_pooled(
+        [_pool(Candidate("exif", datetime(1946, 4, 21, 14, 23, 10)),
+               Candidate("filename", datetime(1946, 4, 21, 14, 23, 10)))],
+        now=NOW,
+    )
+    assert decision.value == datetime(1946, 4, 21, 14, 23, 10)

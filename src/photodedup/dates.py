@@ -112,6 +112,13 @@ SENTINEL_DATES: tuple[tuple[datetime, timedelta], ...] = (
 
 DEFAULT_DISAGREEMENT_MARGIN = timedelta(hours=26)
 
+# QuickTime counts seconds from 1904; Unix from 1970. Software that writes Unix
+# seconds into a QuickTime date field produces a date exactly this much too
+# early (a 2012 clip reads as 1946). In this library, 15 phone videos from
+# 2012 and one from 2013 carried such a date on one copy, and the earliest-wins
+# rule chose it over the correct date on the other copy (2026-11-16).
+QUICKTIME_UNIX_SHIFT = datetime(1970, 1, 1) - datetime(1904, 1, 1)
+
 # Import-time stamps. Two bulk imports into this library overwrote capture
 # dates with the import clock (STATE.md, "Phase 1 result"). Each interval is
 # the earliest and latest photos_date in that batch, measured from the catalog
@@ -227,6 +234,16 @@ def choose_date_pooled(
                 survivors.append(candidate)
             else:
                 rejected.append((candidate.source, why))
+
+    # A survivor that lands on another survivor once shifted forward by the
+    # QuickTime/Unix gap is that other date written in the wrong epoch. Only a
+    # cross-candidate check can see this: a 1946 date is not wrong on its own.
+    shifted = [
+        c for c in survivors
+        if any(abs(c.value + QUICKTIME_UNIX_SHIFT - o.value) <= margin for o in survivors)
+    ]
+    survivors = [c for c in survivors if c not in shifted]
+    rejected.extend((c.source, "epoch_shift") for c in shifted)
 
     if not survivors:
         return Decision(None, None, tuple(rejected), True, "no_plausible_candidate")

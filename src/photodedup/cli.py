@@ -8,7 +8,7 @@ from pathlib import Path
 import click
 
 from photodedup.apply import (
-    plan_lines, require_archive, run_dates, run_merge, run_stage, self_test, write_losers_csv,
+    plan_lines, require_archive, run_dates, stale_date_targets, run_merge, run_stage, self_test, write_losers_csv,
 )
 from photodedup.arbitrate import run_arbitrate
 from photodedup.archive import ArchiveDestination, ArchiveSpace, run_archive
@@ -294,6 +294,7 @@ def archive(catalog: Path, root: Path, limit: int | None) -> None:
 @click.option("--merge", "do_merge", is_flag=True, help="Merge loser albums, keywords, favorite and captions onto keepers.")
 @click.option("--dates", "do_dates", is_flag=True, help="Correct keeper capture dates.")
 @click.option("--redo-dates", is_flag=True, help="Re-apply dates already recorded done (after a verify found them wrong).")
+@click.option("--fix-stale-dates", is_flag=True, help="Re-write keeper dates recorded done that the current date rules no longer choose (implies --dates).")
 @click.option("--sets", "date_sets", default=None, help="Comma-separated set ids: write the set's date to EVERY member (reviewed look-alike sets).")
 @click.option("--stage", "do_stage", is_flag=True, help="Put losers in 'Dedup Delete' albums and write losers.csv.")
 @click.option("--all", "do_all", is_flag=True, help="merge, dates, stage in that order.")
@@ -307,12 +308,19 @@ def archive(catalog: Path, root: Path, limit: int | None) -> None:
 @click.option("--self-test", "test_uuid", default=None, help="UUID of one existing photo: prove the write path on it and restore it.")
 def apply(catalog: Path, do_merge: bool, do_dates: bool, do_stage: bool, do_all: bool,
           include_disagreeing_dates: bool, dry_run: bool, batch: int, losers_csv: Path, redo_dates: bool,
-          date_sets: str | None,
+          date_sets: str | None, fix_stale_dates: bool,
           test_uuid: str | None) -> None:
     """Apply the decisions to Photos. Never deletes anything. Interactive terminal only."""
     conn = open_catalog(catalog)
     if do_all:
         do_merge = do_dates = do_stage = True
+    stale = None
+    if fix_stale_dates:
+        do_dates = True
+        stale = stale_date_targets(conn)
+        click.echo(f"{len(stale)} stale keeper dates:")
+        for t in stale:
+            click.echo(f"  {t.keeper} (set {t.set_id}) -> {t.value.isoformat()}")
     if test_uuid:
         if dry_run:
             raise click.UsageError("--self-test performs real (restored) writes; drop --dry-run")
@@ -350,6 +358,7 @@ def apply(catalog: Path, do_merge: bool, do_dates: bool, do_stage: bool, do_all:
                 conn, writer, include_disagreeing=include_disagreeing_dates, dry_run=dry_run,
                 displayed=displayed if (library and not dry_run) else None, redo=redo_dates,
                 sets=[int(x) for x in date_sets.split(",")] if date_sets else None,
+                targets=stale,
             )
             line = f"dates: {r.done} done, {r.failed} failed, {r.skipped} already done"
             click.echo(line)

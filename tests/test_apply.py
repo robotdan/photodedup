@@ -10,6 +10,7 @@ from photodedup.apply import (
     require_archive,
     run_dates,
     run_merge,
+    stale_date_targets,
 )
 from photodedup.arbitrate import run_arbitrate
 from photodedup.catalog import StageIncomplete, open_catalog, set_stage
@@ -627,3 +628,62 @@ def test_run_dates_with_sets_writes_every_member(dated):
     result = run_dates(dated, fake, now=NOW, sets=[2], displayed=_displayed_from(fake))
     assert (result.done, result.failed) == (2, 0)
     assert fake.get("k2").date == fake.get("l2").date == datetime(2014, 1, 1, 0, 0, 0)
+
+
+# --- stale dates: written under an older rule -----------------------------
+
+
+@pytest.fixture
+def shifted(conn):
+    """Keeper 'k' had the right 2012 date; loser 'l' a QuickTime-epoch 1946
+    one, which an earlier rule chose and wrote onto 'k'."""
+    add_asset(conn, "k", size=20, photos_date="2012-04-21T14:15:37", exif="2012-04-21T21:23:10")
+    add_asset(conn, "l", size=10, photos_date="1946-04-21T14:23:10", exif="2012-04-21T21:23:10")
+    add_set(conn, 1, ["k", "l"])
+    run_arbitrate(conn, now=NOW)
+    archived(conn, "l")
+    conn.execute(
+        """INSERT INTO apply_action (uuid, action, status, detail, previous, applied_at)
+           VALUES ('k', 'date', 'done', ?, ?, 'then')""",
+        (json.dumps({"date": "1946-04-21T14:23:10"}), json.dumps({"date": "2012-04-21T15:15:37"})),
+    )
+    conn.commit()
+    return conn
+
+
+def test_stale_targets_restore_the_keepers_own_date(shifted):
+    [t] = stale_date_targets(shifted)
+    assert (t.keeper, t.value) == ("k", datetime(2012, 4, 21, 14, 15, 37))
+
+
+def test_stale_targets_ignore_dates_the_rules_still_choose(dated):
+    run_dates(dated, fake_for(dated), include_disagreeing=True, now=NOW)
+    assert stale_date_targets(dated) == []
+
+
+def test_run_dates_rewrites_stale_targets_and_keeps_the_first_previous(shifted):
+    fake = fake_for(shifted)
+    fake.photos["k"]["date"] = datetime(1946, 4, 21, 14, 23, 10)
+    result = run_dates(shifted, fake, now=NOW, targets=stale_date_targets(shifted))
+    assert (result.done, result.skipped) == (1, 0)
+    assert fake.get("k").date == datetime(2012, 4, 21, 14, 15, 37)
+    row = shifted.execute("SELECT detail, previous FROM apply_action WHERE uuid='k' AND action='date'").fetchone()
+    assert json.loads(row["detail"]) == {"date": "2012-04-21T14:15:37"}
+    assert json.loads(row["previous"]) == {"date": "2012-04-21T15:15:37"}
+    assert stale_date_targets(shifted) == []
+
+
+def test_stale_targets_keep_a_date_written_from_a_reviewed_look_alike_set(conn):
+    add_asset(conn, "k", size=20, photos_date="2011-01-06T10:08:02", added="2026-04-14T20:59:27")
+    add_asset(conn, "l", size=10, photos_date="2020-12-18T09:24:12", added="2020-12-18T23:00:10")
+    add_asset(conn, "c", size=30, photos_date="2007-07-05T12:58:40", exif="2007-07-05T12:58:40")
+    add_set(conn, 1, ["k", "l"])
+    add_set(conn, 2, ["k", "c"], tier="candidate")
+    run_arbitrate(conn, now=NOW)
+    conn.execute(
+        """INSERT INTO apply_action (uuid, action, status, detail, previous, applied_at)
+           VALUES ('k', 'date', 'done', ?, NULL, 'then')""",
+        (json.dumps({"date": "2007-07-05T12:58:40"}),),
+    )
+    conn.commit()
+    assert stale_date_targets(conn) == []

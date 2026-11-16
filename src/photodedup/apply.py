@@ -5,10 +5,12 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from sqlite3 import Connection
 
+from photodedup.arbitrate import _pools, load_members
 from photodedup.catalog import StageIncomplete, require_stage_complete, set_stage
+from photodedup.dates import DEFAULT_DISAGREEMENT_MARGIN, choose_date_pooled
 from photodedup.photos_write import PhotosWriter
 
 BATCH = 500
@@ -274,6 +276,55 @@ def date_targets(
     return out
 
 
+def stale_date_targets(
+    conn: Connection, *, margin: timedelta = DEFAULT_DISAGREEMENT_MARGIN
+) -> list[DateTarget]:
+    """Keepers whose recorded-done date the current date rules no longer choose.
+
+    A date counts as current when it agrees with today's choice for any set
+    the keeper belongs to, exact or look-alike. Re-runs the date choice for each such keeper's set with today's rules. When
+    the new choice sits within *margin* of the keeper's own catalog date, the
+    keeper never needed a correction and gets its original date back;
+    otherwise it gets the new choice. Decisions are not rewritten.
+    """
+    rows = conn.execute(
+        """
+        SELECT x.uuid, x.detail, m.set_id, a.photos_date, d.review_flags
+        FROM apply_action x
+        JOIN asset a ON a.uuid = x.uuid
+        JOIN dup_set_member m ON m.uuid = x.uuid AND m.tier = 'exact'
+        JOIN decision d ON d.set_id = m.set_id
+        WHERE x.action = 'date' AND x.status = 'done'
+        ORDER BY x.uuid
+        """
+    ).fetchall()
+    def choice_for(set_id: int) -> datetime | None:
+        return choose_date_pooled(_pools(conn, load_members(conn, set_id)), margin=margin).value
+
+    out = []
+    for r in rows:
+        written = datetime.fromisoformat(json.loads(r["detail"])["date"])
+        # A date written from a reviewed look-alike set (`--sets`) is current
+        # as long as that set's choice still agrees with it.
+        other_sets = [
+            o["set_id"] for o in conn.execute(
+                "SELECT set_id FROM dup_set_member WHERE uuid = ? AND set_id != ?",
+                (r["uuid"], r["set_id"]),
+            )
+        ]
+        choice = choice_for(r["set_id"])
+        if choice is None or any(
+            c is not None and abs(c - written) <= margin
+            for c in [choice, *map(choice_for, other_sets)]
+        ):
+            continue
+        original = datetime.fromisoformat(r["photos_date"]) if r["photos_date"] else None
+        value = original if original is not None and abs(choice - original) <= margin else choice
+        out.append(DateTarget(r["uuid"], r["set_id"], value,
+                              "dates_disagree" in (r["review_flags"] or "").split(",")))
+    return out
+
+
 DATE_CORRECTION_ROUNDS = 3
 
 
@@ -287,6 +338,7 @@ def run_dates(
     displayed: Callable[[list[str]], Mapping[str, datetime | None]] | None = None,
     redo: bool = False,
     sets: Sequence[int] | None = None,
+    targets: Sequence[DateTarget] | None = None,
 ) -> ApplyResult:
     """Write each keeper's arbitrated date and make sure Photos DISPLAYS it.
 
@@ -299,15 +351,19 @@ def run_dates(
     value matches, and any drift is corrected by re-writing shifted by the
     drift, up to DATE_CORRECTION_ROUNDS times. *redo* re-applies dates that
     were already recorded done, for a run whose verify found them wrong.
+    Explicit *targets* (from `stale_date_targets`) replace the decision-based
+    ones and are always written, since they are done rows by construction.
     """
     require_archive(conn)
-    done_before = set() if redo else _done(conn, "date")
+    done_before = set() if (redo or targets is not None) else _done(conn, "date")
     done = failed = skipped = 0
     if not dry_run:
         set_stage(conn, "apply", "running")
     # uuid -> (target, previous, value currently written)
     pending: dict[str, tuple[DateTarget, dict | None, datetime]] = {}
-    for target in date_targets(conn, include_disagreeing=include_disagreeing, sets=sets):
+    if targets is None:
+        targets = date_targets(conn, include_disagreeing=include_disagreeing, sets=sets)
+    for target in targets:
         if target.keeper in done_before:
             skipped += 1
             continue
