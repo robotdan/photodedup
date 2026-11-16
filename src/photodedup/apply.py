@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import csv
 import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from pathlib import Path
 from sqlite3 import Connection
 
 from photodedup.arbitrate import _pools, load_members
@@ -341,6 +343,26 @@ def stale_date_targets(
         value = original if original is not None and abs(choice - original) <= margin else choice
         out.append(DateTarget(r["uuid"], r["set_id"], value,
                               "dates_disagree" in (r["review_flags"] or "").split(",")))
+    return out
+
+
+def file_date_targets(path: Path) -> list[DateTarget]:
+    """Dates a person decided by hand: a CSV with `uuid` and `date` columns,
+    the date as the wall-clock time Photos should SHOW (ISO 8601, no zone).
+    Anything else in a row (a filename, a reason) is ignored."""
+    with path.open(newline="") as fh:
+        rows = list(csv.DictReader(fh))
+    if not rows or not {"uuid", "date"} <= set(rows[0]):
+        raise ValueError(f"{path} needs a header with uuid and date columns")
+    out = []
+    for n, r in enumerate(rows, start=2):
+        try:
+            value = datetime.fromisoformat(r["date"].strip())
+        except ValueError as exc:
+            raise ValueError(f"{path} line {n}: bad date {r['date']!r}") from exc
+        if value.tzinfo is not None:
+            raise ValueError(f"{path} line {n}: give the shown wall-clock time, without a zone")
+        out.append(DateTarget(r["uuid"].strip(), 0, value, False))
     return out
 
 

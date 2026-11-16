@@ -11,6 +11,7 @@ from photodedup.apply import (
     run_dates,
     run_merge,
     stale_date_targets,
+    file_date_targets,
 )
 from photodedup.arbitrate import run_arbitrate
 from photodedup.catalog import StageIncomplete, open_catalog, set_stage
@@ -710,3 +711,37 @@ def test_an_ordinary_failed_date_is_not_a_stale_target(dated):
     )
     dated.commit()
     assert stale_date_targets(dated) == []
+
+
+# --- hand-decided dates from a CSV -----------------------------------------
+
+
+def test_file_date_targets_read_uuid_and_date(tmp_path):
+    f = tmp_path / "d.csv"
+    f.write_text("uuid,date,filename\nk1,2013-11-25T08:38:22,a.jpg\nk2, 2005-09-15T12:23:20 ,b.jpg\n")
+    ts = file_date_targets(f)
+    assert [(t.keeper, t.value) for t in ts] == [
+        ("k1", datetime(2013, 11, 25, 8, 38, 22)), ("k2", datetime(2005, 9, 15, 12, 23, 20))]
+
+
+@pytest.mark.parametrize("body", ["uuid,when\nk1,2013-11-25T08:38:22\n",
+                                  "uuid,date\nk1,yesterday\n",
+                                  "uuid,date\nk1,2013-11-25T08:38:22-07:00\n"])
+def test_file_date_targets_refuse_bad_input(tmp_path, body):
+    f = tmp_path / "d.csv"
+    f.write_text(body)
+    with pytest.raises(ValueError):
+        file_date_targets(f)
+
+
+def test_run_dates_writes_file_targets_over_done_rows(dated, tmp_path):
+    fake = fake_for(dated)
+    run_dates(dated, fake, now=NOW)                    # k1 now done at 2014-05-12T17:00
+    f = tmp_path / "d.csv"
+    f.write_text("uuid,date\nk1,2014-05-12T08:15:00\n")
+    result = run_dates(dated, fake, now=NOW, displayed=_displayed_from(fake), targets=file_date_targets(f))
+    assert (result.done, result.skipped) == (1, 0)
+    assert fake.get("k1").date == datetime(2014, 5, 12, 8, 15, 0)
+    row = dated.execute("SELECT detail, previous FROM apply_action WHERE uuid='k1' AND action='date'").fetchone()
+    assert json.loads(row["detail"])["date"] == "2014-05-12T08:15:00"
+    assert json.loads(row["previous"]) == {"date": "2020-12-18T09:10:00"}
