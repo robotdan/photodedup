@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 from datetime import timedelta
 from pathlib import Path
 
@@ -23,6 +24,7 @@ from photodedup.catalog import (
 from photodedup.grouping import HashStageIncomplete, run_group
 from photodedup.hash_stage import HashStageInterrupted, run_hash
 from photodedup.library import LibraryUnavailable, album_members, iter_assets, read_states
+from photodedup.pairs import PAIRS_ALBUM, read_pairs, resolve_pairs
 from photodedup.photos_write import PhotosUnavailable, PhotoscriptWriter
 from photodedup.report import duplicate_report, survey_report
 from photodedup.review import write_review
@@ -421,4 +423,36 @@ def verify(catalog: Path, out: Path) -> None:
         f"{len(result.losers_trashed)} in Recently Deleted, {len(result.losers_gone)} gone, "
         f"{len(result.keepers_missing)} keepers missing, {len(result.dates_wrong)} dates wrong, "
         f"{len(result.stale_staged)} staged photos no longer losers"
+    )
+
+
+@main.command()
+@click.argument("pairs_csv", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--dry-run", is_flag=True, help="Show what each keeper would receive; write nothing.")
+@click.option("--log", type=click.Path(path_type=Path), default=Path("reports/pairs_result.csv"), show_default=True)
+def pairs(pairs_csv: Path, dry_run: bool, log: Path) -> None:
+    """Resolve hand-picked duplicate pairs (CSV with keeper,loser columns):
+    copy each loser's albums, keywords, favorite and captions onto its keeper,
+    confirm, then put the loser in the 'Dedup Delete pairs' album. Never
+    deletes anything. Interactive terminal only."""
+    try:
+        chosen = read_pairs(pairs_csv)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    try:
+        results = resolve_pairs(PhotoscriptWriter(), chosen, dry_run=dry_run)
+    except PhotosUnavailable as exc:
+        raise click.ClickException(str(exc)) from exc
+    log.parent.mkdir(parents=True, exist_ok=True)
+    with log.open("w", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(["keeper", "loser", "status", "detail"])
+        for r in results:
+            w.writerow([r.pair.keeper, r.pair.loser, r.status, r.detail])
+            if r.status != "staged":
+                click.echo(f"  {r.status}: {r.pair.loser} -> {r.pair.keeper}: {r.detail}")
+    counts = {s: sum(r.status == s for r in results) for s in ("staged", "failed", "skipped")}
+    click.echo(
+        f"pairs: {counts['staged']} staged in '{PAIRS_ALBUM}', {counts['failed']} failed, "
+        f"{counts['skipped']} skipped; log in {log}"
     )
