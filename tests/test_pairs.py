@@ -54,7 +54,28 @@ def test_rerun_after_staging_is_harmless():
     assert r.status == "staged" and fake.album_members(PAIRS_ALBUM, FOLDER) == ["old"]
 
 
-@pytest.mark.parametrize("body", ["keeper,other\na,b\n", "keeper,loser\na,a\n", "keeper,loser\na,b\nb,c\n"])
+def test_one_keeper_absorbs_several_losers():
+    fake2 = FakePhotos({"old": {}, "new": {}, "older": {}})
+    fake2.add_to_album(fake2.ensure_album("Party"), ["old"])
+    fake2.add_to_album(fake2.ensure_album("Trip"), ["older"])
+    results = resolve_pairs(fake2, [Pair("new", "old"), Pair("new", "older")])
+    assert [r.status for r in results] == ["staged", "staged"]
+    assert {"Party", "Trip"} <= set(fake2.get("new").albums)
+    assert sorted(fake2.album_members(PAIRS_ALBUM, FOLDER)) == ["old", "older"]
+
+
+def test_read_pairs_allows_a_repeated_keeper(tmp_path):
+    f = tmp_path / "p.csv"
+    f.write_text("keeper,loser\na,b\na,c\n")
+    assert read_pairs(f) == [Pair("a", "b"), Pair("a", "c")]
+
+
+@pytest.mark.parametrize("body", [
+    "keeper,other\na,b\n",
+    "keeper,loser\na,a\n",
+    "keeper,loser\na,b\nb,c\n",
+    "keeper,loser\na,b\nc,b\n",
+])
 def test_read_pairs_refuses_bad_input(tmp_path, body):
     f = tmp_path / "p.csv"
     f.write_text(body)

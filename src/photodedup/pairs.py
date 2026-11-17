@@ -38,14 +38,16 @@ def read_pairs(path: Path) -> list[Pair]:
     if not rows or not {"keeper", "loser"} <= set(rows[0]):
         raise ValueError(f"{path} needs a header with keeper and loser columns")
     pairs = [Pair(r["keeper"].strip(), r["loser"].strip()) for r in rows]
-    seen: set[str] = set()
+    # A keeper may absorb several losers (a group of three or more copies), but
+    # a loser is deleted once and must never be anyone's keeper.
+    keepers = {p.keeper for p in pairs}
+    losers: set[str] = set()
     for p in pairs:
-        if p.keeper == p.loser:
-            raise ValueError(f"{p.keeper} is both keeper and loser")
-        for u in (p.keeper, p.loser):
-            if u in seen:
-                raise ValueError(f"{u} appears in more than one pair")
-            seen.add(u)
+        if p.loser in keepers:
+            raise ValueError(f"{p.loser} is both keeper and loser")
+        if p.loser in losers:
+            raise ValueError(f"{p.loser} is a loser in more than one pair")
+        losers.add(p.loser)
     return pairs
 
 
