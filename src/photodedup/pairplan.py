@@ -135,6 +135,32 @@ def _parse(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value[:19]) if value else None
 
 
+def merge_overlapping(sets: dict[int, list[str]], members: dict[str, Member]) -> dict[int, list[Member]]:
+    """Join sets that share a photo (an exact set and a look-alike set can
+    both hold it), so no photo is a keeper in one plan and a loser in another.
+    A merged set takes its lowest id."""
+    parent = {sid: sid for sid in sets}
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    owner: dict[str, int] = {}
+    for sid, uuids in sorted(sets.items()):
+        for u in uuids:
+            if u in owner:
+                a, b = find(owner[u]), find(sid)
+                parent[max(a, b)] = min(a, b)
+            else:
+                owner[u] = sid
+    merged: dict[int, list[str]] = {}
+    for sid, uuids in sets.items():
+        merged.setdefault(find(sid), []).extend(uuids)
+    return {sid: [members[u] for u in sorted(set(uuids))] for sid, uuids in merged.items()}
+
+
 def plan_catalog(conn, *, exclude: set[str] = frozenset()) -> list[SetPlan]:
     """Plan every duplicate set in the catalog. A set touching an excluded
     uuid (one already decided elsewhere) is skipped, not reviewed."""
@@ -149,14 +175,16 @@ def plan_catalog(conn, *, exclude: set[str] = frozenset()) -> list[SetPlan]:
         if r["source"] == "filename" and value.time() == datetime.min.time():
             continue
         cands.setdefault((r["uuid"], r["source"]), value)
-    by_set: dict[int, list[Member]] = {}
+    members: dict[str, Member] = {}
+    sets: dict[int, list[str]] = {}
     for r in conn.execute(
         """SELECT m.set_id, a.uuid, a.original_filename, a.filename, a.width, a.height,
                   a.file_size, a.photos_date, a.date_added, a.has_adjustments
            FROM dup_set_member m JOIN asset a ON a.uuid = m.uuid
            ORDER BY m.set_id, a.uuid"""
     ):
-        by_set.setdefault(r["set_id"], []).append(Member(
+        sets.setdefault(r["set_id"], []).append(r["uuid"])
+        members[r["uuid"]] = Member(
             uuid=r["uuid"],
             filename=r["original_filename"] or r["filename"] or "",
             width=r["width"] or 0,
@@ -167,7 +195,8 @@ def plan_catalog(conn, *, exclude: set[str] = frozenset()) -> list[SetPlan]:
             has_adjustments=bool(r["has_adjustments"]),
             exif=cands.get((r["uuid"], "exif")),
             filename_date=cands.get((r["uuid"], "filename")),
-        ))
+        )
+    by_set = merge_overlapping(sets, members)
     return [
         plan_set(set_id, members)
         for set_id, members in sorted(by_set.items())

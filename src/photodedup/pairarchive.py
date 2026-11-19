@@ -77,6 +77,16 @@ def _write_manifest(conn: Connection, root: Path, name: str) -> None:
     os.replace(tmp, root / name)
 
 
+def review_folder(loser) -> str:
+    """edits-review/ subfolder for a loser row: <photos date>_<filename stem>."""
+    date = (loser["photos_date"] or "undated")[:10]
+    return f"{date}_{_sanitize_name((loser['original_filename'] or loser['uuid']).rsplit('.', 1)[0])}"
+
+
+def review_file(prefix: str, a) -> str:
+    return f"{prefix}_{_sanitize_name(a['original_filename'] or a['uuid'])}"
+
+
 def run_pair_archive(
     conn: Connection,
     rows: list[dict],
@@ -191,11 +201,9 @@ def run_pair_archive(
         loser, keeper = assets[row["loser"]], keepers.get(row["keeper"])
         if keeper is None or not keeper["path"] or not loser["path"]:
             continue
-        date = (loser["photos_date"] or "undated")[:10]
-        name = _sanitize_name((loser["original_filename"] or loser["uuid"]).rsplit(".", 1)[0])
-        folder = root / REVIEW_DIR / f"{date}_{name}"
+        folder = root / REVIEW_DIR / review_folder(loser)
         for prefix, a in (("original", loser), ("edited", keeper)):
-            dst = folder / f"{prefix}_{_sanitize_name(a['original_filename'] or a['uuid'])}"
+            dst = folder / review_file(prefix, a)
             if dst.exists():
                 continue
             try:

@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from photodedup.pairplan import Member, is_edited, plan_set, stem
+from photodedup.pairplan import Member, is_edited, merge_overlapping, plan_set, stem
 
 T = datetime(2014, 4, 12, 12, 0, 39)
 
@@ -46,3 +46,9 @@ def test_review_cases():
     assert plan_set(1, [m("a", "x.mp4", exif=utc), m("b", "x.mp4", exif=utc)]).reason == \
         "no copy shows the EXIF or filename time"
     assert plan_set(1, [m("a", "x.jpg", adj=True), m("b", "x.jpg", adj=True)]).status == "review"
+
+
+def test_sets_sharing_a_photo_are_merged():
+    ms = {u: m(u, "x.jpg") for u in "abcde"}
+    merged = merge_overlapping({1: ["a", "b"], 2: ["b", "c"], 3: ["d", "e"], 4: ["c"]}, ms)
+    assert {k: [x.uuid for x in v] for k, v in merged.items()} == {1: ["a", "b", "c"], 3: ["d", "e"]}

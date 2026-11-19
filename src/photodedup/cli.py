@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import shlex
 from datetime import timedelta
 from pathlib import Path
 
@@ -26,6 +27,7 @@ from photodedup.hash_stage import HashStageInterrupted, run_hash
 from photodedup.library import LibraryUnavailable, album_members, iter_assets, iter_paths, read_states
 from photodedup.pairarchive import archived, read_pairs_rows, run_pair_archive
 from photodedup.pairplan import plan_catalog
+from photodedup.reviewpage import write_review_page
 from photodedup.pairs import PAIRS_ALBUM, PairResult, read_pairs, resolve_pairs
 from photodedup.photos_write import PhotosUnavailable, PhotoscriptWriter
 from photodedup.report import duplicate_report, survey_report
@@ -434,7 +436,9 @@ def verify(catalog: Path, out: Path) -> None:
 @click.option("--log", type=click.Path(path_type=Path), default=Path("reports/pairs_result.csv"), show_default=True)
 @click.option("--archived-in", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None,
               help="Catalog whose archive must hold each loser's verified original; losers without one are skipped.")
-def pairs(pairs_csv: Path, dry_run: bool, log: Path, archived_in: Path | None) -> None:
+@click.option("--keep", "keeps", multiple=True, type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              help="CSV with a loser column (the review page's export); those losers stay in the library. Repeatable.")
+def pairs(pairs_csv: Path, dry_run: bool, log: Path, archived_in: Path | None, keeps: tuple[Path, ...]) -> None:
     """Resolve hand-picked duplicate pairs (CSV with keeper,loser columns):
     copy each loser's albums, keywords, favorite and captions onto its keeper,
     confirm, then put the loser in the 'Dedup Delete pairs' album. Never
@@ -443,13 +447,16 @@ def pairs(pairs_csv: Path, dry_run: bool, log: Path, archived_in: Path | None) -
         chosen = read_pairs(pairs_csv)
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
+    keep = {r["loser"] for f in keeps for r in read_pairs_rows(f)}
+    kept = [PairResult(p, "skipped", "kept after review") for p in chosen if p.loser in keep]
+    chosen = [p for p in chosen if p.loser not in keep]
     unarchived: list[PairResult] = []
     if archived_in is not None:
         have = archived(open_catalog(archived_in), [p.loser for p in chosen])
         unarchived = [PairResult(p, "skipped", "loser not archived") for p in chosen if p.loser not in have]
         chosen = [p for p in chosen if p.loser in have]
     try:
-        results = unarchived + resolve_pairs(PhotoscriptWriter(), chosen, dry_run=dry_run)
+        results = kept + unarchived + resolve_pairs(PhotoscriptWriter(), chosen, dry_run=dry_run)
     except PhotosUnavailable as exc:
         raise click.ClickException(str(exc)) from exc
     log.parent.mkdir(parents=True, exist_ok=True)
@@ -553,3 +560,15 @@ def archive_pairs(pairs_csv: Path, catalog: Path, root: Path) -> None:
         click.echo(f"  not archived: {u}")
     stage = get_stage(conn, "archive")
     click.echo(f"archive stage: {stage['status'] if stage is not None else 'unknown'}")
+
+
+@main.command("review-page")
+@click.argument("pairs_csv", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--catalog", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=True)
+@click.option("--root", type=click.Path(path_type=Path), default=DEFAULT_ARCHIVE, show_default=True)
+def review_page(pairs_csv: Path, catalog: Path, root: Path) -> None:
+    """Write edits-review/index.html: the edit pairs side by side, with marks
+    for originals to keep, exported as a CSV for `pairs --keep`."""
+    dest, total, missing = write_review_page(open_catalog(catalog), read_pairs_rows(pairs_csv), root)
+    click.echo(f"{total} pairs in {dest}" + (f"; {missing} have copies missing on the drive" if missing else ""))
+    click.echo(f"open it with: open {shlex.quote(str(dest))}")
