@@ -23,8 +23,10 @@ from photodedup.catalog import (
 )
 from photodedup.grouping import HashStageIncomplete, run_group
 from photodedup.hash_stage import HashStageInterrupted, run_hash
-from photodedup.library import LibraryUnavailable, album_members, iter_assets, read_states
-from photodedup.pairs import PAIRS_ALBUM, read_pairs, resolve_pairs
+from photodedup.library import LibraryUnavailable, album_members, iter_assets, iter_paths, read_states
+from photodedup.pairarchive import archived, read_pairs_rows, run_pair_archive
+from photodedup.pairplan import plan_catalog
+from photodedup.pairs import PAIRS_ALBUM, PairResult, read_pairs, resolve_pairs
 from photodedup.photos_write import PhotosUnavailable, PhotoscriptWriter
 from photodedup.report import duplicate_report, survey_report
 from photodedup.review import write_review
@@ -430,7 +432,9 @@ def verify(catalog: Path, out: Path) -> None:
 @click.argument("pairs_csv", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option("--dry-run", is_flag=True, help="Show what each keeper would receive; write nothing.")
 @click.option("--log", type=click.Path(path_type=Path), default=Path("reports/pairs_result.csv"), show_default=True)
-def pairs(pairs_csv: Path, dry_run: bool, log: Path) -> None:
+@click.option("--archived-in", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None,
+              help="Catalog whose archive must hold each loser's verified original; losers without one are skipped.")
+def pairs(pairs_csv: Path, dry_run: bool, log: Path, archived_in: Path | None) -> None:
     """Resolve hand-picked duplicate pairs (CSV with keeper,loser columns):
     copy each loser's albums, keywords, favorite and captions onto its keeper,
     confirm, then put the loser in the 'Dedup Delete pairs' album. Never
@@ -439,8 +443,13 @@ def pairs(pairs_csv: Path, dry_run: bool, log: Path) -> None:
         chosen = read_pairs(pairs_csv)
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
+    unarchived: list[PairResult] = []
+    if archived_in is not None:
+        have = archived(open_catalog(archived_in), [p.loser for p in chosen])
+        unarchived = [PairResult(p, "skipped", "loser not archived") for p in chosen if p.loser not in have]
+        chosen = [p for p in chosen if p.loser in have]
     try:
-        results = resolve_pairs(PhotoscriptWriter(), chosen, dry_run=dry_run)
+        results = unarchived + resolve_pairs(PhotoscriptWriter(), chosen, dry_run=dry_run)
     except PhotosUnavailable as exc:
         raise click.ClickException(str(exc)) from exc
     log.parent.mkdir(parents=True, exist_ok=True)
@@ -456,3 +465,91 @@ def pairs(pairs_csv: Path, dry_run: bool, log: Path) -> None:
         f"pairs: {counts['staged']} staged in '{PAIRS_ALBUM}', {counts['failed']} failed, "
         f"{counts['skipped']} skipped; log in {log}"
     )
+
+
+@main.command("plan-pairs")
+@click.option("--catalog", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=True)
+@click.option("--out", type=click.Path(path_type=Path), required=True, help="Pairs CSV for `archive-pairs` and `pairs`.")
+@click.option("--dates-out", type=click.Path(path_type=Path), required=True, help="uuid,date CSV for `apply --dates-from`.")
+@click.option("--review-out", type=click.Path(path_type=Path), required=True, help="Sets left for a person to decide.")
+@click.option("--exclude", "excludes", multiple=True, type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              help="A pairs CSV already decided; sets touching its photos are left out.")
+def plan_pairs(catalog: Path, out: Path, dates_out: Path, review_out: Path, excludes: tuple[Path, ...]) -> None:
+    """Plan keepers and losers for sets that are one shot saved more than once. Read-only."""
+    conn = open_catalog(catalog)
+    skip = {u for f in excludes for r in read_pairs_rows(f) for u in (r["keeper"], r["loser"])}
+    plans = plan_catalog(conn, exclude=skip)
+    planned = [p for p in plans if p.status == "planned"]
+    for f in (out, dates_out, review_out):
+        f.parent.mkdir(parents=True, exist_ok=True)
+    with out.open("w", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(["keeper", "loser", "filename", "why", "review_original"])
+        for p in planned:
+            k = p.keeper
+            for m in p.losers:
+                why = (f"set {p.set_id}; keeper {k.filename} {k.width}x{k.height} added {k.date_added[:10]}; "
+                       f"loser {m.width}x{m.height} dated {m.photos_date} added {m.date_added[:10]}")
+                w.writerow([k.uuid, m.uuid, m.filename, why, "1" if m is p.review_original else ""])
+    with dates_out.open("w", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(["uuid", "date", "filename", "was"])
+        for p in planned:
+            if p.date is not None:
+                w.writerow([p.keeper.uuid, p.date.isoformat(), p.keeper.filename, p.keeper.photos_date.isoformat()])
+    with review_out.open("w", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(["set_id", "reason", "uuid", "filename", "date", "added", "size", "pixels"])
+        rows = conn.execute(
+            "SELECT m.set_id, a.uuid, a.original_filename, a.photos_date, a.date_added, a.file_size, a.width, a.height "
+            "FROM dup_set_member m JOIN asset a ON a.uuid = m.uuid ORDER BY m.set_id"
+        ).fetchall()
+        reasons = {p.set_id: p.reason for p in plans if p.status == "review"}
+        for r in rows:
+            if r["set_id"] in reasons:
+                w.writerow([r["set_id"], reasons[r["set_id"]], r["uuid"], r["original_filename"], r["photos_date"],
+                            (r["date_added"] or "")[:10], r["file_size"], f"{r['width']}x{r['height']}"])
+    kept = sum(len(p.kept_also) for p in planned)
+    click.echo(
+        f"{len(planned)} sets planned: {sum(len(p.losers) for p in planned)} losers in {out}, "
+        f"{sum(p.date is not None for p in planned)} keeper dates in {dates_out}, "
+        f"{sum(p.review_original is not None for p in planned)} edit pairs for side-by-side review, "
+        f"{kept} copies kept because they were edited in Photos"
+    )
+    click.echo(f"{len(plans) - len(planned)} sets left for review in {review_out}")
+
+
+@main.command("archive-pairs")
+@click.argument("pairs_csv", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--catalog", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=True)
+@click.option("--root", type=click.Path(path_type=Path), default=DEFAULT_ARCHIVE, show_default=True)
+def archive_pairs(pairs_csv: Path, catalog: Path, root: Path) -> None:
+    """Copy each pairs-CSV loser's original to the archive and verify it; also
+    put edit pairs side by side under edits-review/. Read-only against Photos; resumable."""
+    conn = open_catalog(catalog)
+    rows = read_pairs_rows(pairs_csv)
+    paths = None
+    wanted = {r["loser"] for r in rows}
+    extras = conn.execute(
+        f"SELECT COUNT(*) FROM asset WHERE (has_adjustments = 1 OR is_live = 1) AND uuid IN ({','.join('?' * len(wanted))})",
+        list(wanted),
+    ).fetchone()[0] if wanted else 0
+    run_row = get_run(conn)
+    try:
+        if extras and run_row is not None:
+            paths = {p.uuid: p for p in iter_paths(Path(run_row["library_path"])) if p.uuid in wanted}
+        result = run_pair_archive(
+            conn, rows, root, manifest_name=f"manifest-{catalog.stem}.csv", paths=paths,
+            progress=lambda done, total: click.echo(f"  {done}/{total}", err=True),
+        )
+    except (ArchiveSpace, ArchiveDestination, LibraryUnavailable) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(
+        f"{result.copied} files copied, {result.skipped} losers already archived, "
+        f"{result.mismatched} mismatched (will retry), {len(result.missing)} missing sources, "
+        f"{len(result.unknown)} not in the catalog; {result.review_copies} side-by-side copies in {root}/edits-review"
+    )
+    for u in result.missing[:20] + result.unknown[:20]:
+        click.echo(f"  not archived: {u}")
+    stage = get_stage(conn, "archive")
+    click.echo(f"archive stage: {stage['status'] if stage is not None else 'unknown'}")
