@@ -146,6 +146,8 @@ try {
 const save = () => { try { localStorage.setItem(KEY, JSON.stringify(picks)); } catch (e) {} };
 const pick = e => picks[e.loser] || e.kept;
 const changed = e => pick(e) !== e.kept;
+// encodeURI leaves # and ? alone, and a filename like "Photo #4.jpg" has them.
+const src = p => p.split("/").map(encodeURIComponent).join("/");
 const NAMES = { orig: "Keep original", edit: "Keep Google edit", both: "Keep both" };
 const list = document.getElementById("list"), stat = document.getElementById("stat"), zoom = document.getElementById("zoom");
 let shown = [], cur = 0, sample = null;
@@ -167,7 +169,7 @@ function card(e, i) {
   el.querySelector(".ei").textContent = e.editInfo;
   el.querySelector(".df").textContent = e.diff;
   const [a, b] = el.querySelectorAll("img");
-  a.src = encodeURI(e.orig); b.src = encodeURI(e.edit);
+  a.src = src(e.orig); b.src = src(e.edit);
   a.onclick = b.onclick = () => { cur = i; openZoom(); };
   el.querySelectorAll("input").forEach(r => r.onchange = () => { cur = i; choose(r.value); });
   label(el, e);
@@ -219,14 +221,14 @@ function openZoom() {
   const e = shown[cur]; if (!e) return;
   flip = null;
   zoom.className = "on";
-  zoom.innerHTML = `<div style="position:relative"><img src="${encodeURI(e.orig)}"><span class="lbl" style="left:8px">Original</span></div>
-                    <div style="position:relative"><img src="${encodeURI(e.edit)}"><span class="lbl" style="left:8px">Google edit</span></div>`;
+  zoom.innerHTML = `<div style="position:relative"><img src="${src(e.orig)}"><span class="lbl" style="left:8px">Original</span></div>
+                    <div style="position:relative"><img src="${src(e.edit)}"><span class="lbl" style="left:8px">Google edit</span></div>`;
 }
 function flipZoom() {
   const e = shown[cur]; if (!e) return;
   flip = flip === "orig" ? "edit" : "orig";
   zoom.className = "on one";
-  zoom.innerHTML = `<div style="position:relative"><img src="${encodeURI(e[flip])}"><span class="lbl" style="left:8px">${flip === "orig" ? "Original" : "Google edit"}</span></div>`;
+  zoom.innerHTML = `<div style="position:relative"><img src="${src(e[flip])}"><span class="lbl" style="left:8px">${flip === "orig" ? "Original" : "Google edit"}</span></div>`;
 }
 zoom.onclick = () => { zoom.className = ""; };
 document.addEventListener("keydown", ev => {
