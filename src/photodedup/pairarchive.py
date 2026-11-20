@@ -7,8 +7,9 @@ verified by SHA-256, and recorded in the catalog's `archive_file`, exactly as
 stem>.csv: `manifest.csv` belongs to the catalog that wrote it, and rewriting it
 from a different catalog would drop every file that catalog does not know.
 
-Rows flagged `review_original` also get a side-by-side copy under
-edits-review/<date>_<stem>/ (original_* and edited_*), for spot checks. Those
+Rows flagged `edit_pair` (one copy is Google's `-edited` file) also get a
+side-by-side copy under edits-review/<date>_<stem>/ (original_* and edited_*),
+named from the unedited copy whichever one is kept, for spot checks. Those
 copies are a convenience and not part of the verified archive.
 """
 
@@ -36,6 +37,7 @@ from photodedup.archive import (
 )
 from photodedup.catalog import set_stage
 from photodedup.library import AssetPaths
+from photodedup.pairplan import is_edited
 
 REVIEW_DIR = "edits-review"
 
@@ -77,10 +79,15 @@ def _write_manifest(conn: Connection, root: Path, name: str) -> None:
     os.replace(tmp, root / name)
 
 
-def review_folder(loser) -> str:
-    """edits-review/ subfolder for a loser row: <photos date>_<filename stem>."""
-    date = (loser["photos_date"] or "undated")[:10]
-    return f"{date}_{_sanitize_name((loser['original_filename'] or loser['uuid']).rsplit('.', 1)[0])}"
+def split_pair(keeper, loser):
+    """(unedited, edited) for an edit pair, whichever of the two is kept."""
+    return (keeper, loser) if is_edited(loser["original_filename"] or "") else (loser, keeper)
+
+
+def review_folder(orig) -> str:
+    """edits-review/ subfolder for a pair: <photos date>_<unedited filename stem>."""
+    date = (orig["photos_date"] or "undated")[:10]
+    return f"{date}_{_sanitize_name((orig['original_filename'] or orig['uuid']).rsplit('.', 1)[0])}"
 
 
 def review_file(prefix: str, a) -> str:
@@ -110,7 +117,7 @@ def run_pair_archive(
             assets[row["loser"]] = a
     keepers = {
         r["keeper"]: conn.execute("SELECT * FROM asset WHERE uuid = ?", (r["keeper"],)).fetchone()
-        for r in rows if r.get("review_original") == "1"
+        for r in rows if r.get("edit_pair") == "1"
     }
     done = {(r[0], r[1]) for r in conn.execute("SELECT uuid, kind FROM archive_file")}
 
@@ -196,13 +203,14 @@ def run_pair_archive(
     _write_manifest(conn, root, manifest_name)
 
     for row in rows:
-        if row.get("review_original") != "1" or row["loser"] not in assets:
+        if row.get("edit_pair") != "1" or row["loser"] not in assets:
             continue
         loser, keeper = assets[row["loser"]], keepers.get(row["keeper"])
         if keeper is None or not keeper["path"] or not loser["path"]:
             continue
-        folder = root / REVIEW_DIR / review_folder(loser)
-        for prefix, a in (("original", loser), ("edited", keeper)):
+        orig, edit = split_pair(keeper, loser)
+        folder = root / REVIEW_DIR / review_folder(orig)
+        for prefix, a in (("original", orig), ("edited", edit)):
             dst = folder / review_file(prefix, a)
             if dst.exists():
                 continue

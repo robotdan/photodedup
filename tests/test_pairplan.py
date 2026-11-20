@@ -14,18 +14,18 @@ def test_stem_and_edited():
     assert is_edited("IMG_1-edited.jpg") and not is_edited("IMG_1.jpg")
 
 
-def test_edited_copy_is_kept_and_original_goes_to_review():
-    p = plan_set(1, [m("o", "IMG_1.jpg"), m("e", "IMG_1-edited.jpg", size=500)])
-    assert p.status == "planned" and p.keeper.uuid == "e"
-    assert [x.uuid for x in p.losers] == ["o"] and p.review_original.uuid == "o"
+def test_original_is_kept_and_the_edit_is_its_pair():
+    p = plan_set(1, [m("e", "IMG_1-edited.jpg", size=500), m("o", "IMG_1.jpg")])
+    assert p.status == "planned" and p.keeper.uuid == "o"
+    assert [x.uuid for x in p.losers] == ["e"] and p.edit_pair.uuid == "e"
 
 
 def test_hour_shifted_keeper_takes_the_time_the_right_copy_shows():
     p = plan_set(1, [
-        m("e", "IMG_1-edited.jpg", date=datetime(2014, 4, 12, 10, 0, 39)),
-        m("o", "IMG_1.jpg"),
+        m("o", "IMG_1.jpg", date=datetime(2014, 4, 12, 10, 0, 39)),
+        m("e", "IMG_1-edited.jpg"),
     ])
-    assert p.keeper.uuid == "e" and p.date == T
+    assert p.keeper.uuid == "o" and p.date == T
 
 
 def test_keeper_already_right_gets_no_date():

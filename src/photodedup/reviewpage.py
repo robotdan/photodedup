@@ -1,5 +1,8 @@
 """A local web page for spot-checking edit pairs under edits-review/.
 
+With a `measure-edits` CSV, the page shows only pairs whose edit visibly
+differs (a crop, a rotation, or a measurable color change), largest first.
+
 Writes edits-review/index.html next to the side-by-side copies `archive-pairs`
 made. The page loads the images by relative path, so it works straight from
 the drive with no server. Marks are kept in the browser's localStorage and
@@ -12,40 +15,64 @@ import json
 from pathlib import Path
 from sqlite3 import Connection
 
-from photodedup.pairarchive import REVIEW_DIR, review_file, review_folder
+from photodedup.pairarchive import REVIEW_DIR, review_file, review_folder, split_pair
 
 PAGE = "index.html"
 
 
-def review_entries(conn: Connection, rows: list[dict], root: Path) -> list[dict]:
+def review_entries(conn: Connection, rows: list[dict], root: Path, diffs: dict[str, dict] | None = None) -> list[dict]:
     out = []
     for row in rows:
-        if row.get("review_original") != "1":
+        if row.get("edit_pair") != "1":
             continue
         loser = conn.execute("SELECT * FROM asset WHERE uuid = ?", (row["loser"],)).fetchone()
         keeper = conn.execute("SELECT * FROM asset WHERE uuid = ?", (row["keeper"],)).fetchone()
         if loser is None or keeper is None:
             continue
-        folder = review_folder(loser)
-        orig, edit = review_file("original", loser), review_file("edited", keeper)
+        o, e = split_pair(keeper, loser)
+        d = (diffs or {}).get(loser["uuid"])
+        if diffs is not None and (d is None or d.get("visible") != "True"):
+            continue
+        folder = review_folder(o)
+        orig, edit = review_file("original", o), review_file("edited", e)
         out.append({
             "loser": loser["uuid"],
             "keeper": keeper["uuid"],
-            "name": loser["original_filename"] or loser["uuid"],
-            "date": loser["photos_date"] or "",
+            "kept": "orig" if keeper is o else "edit",
+            "name": o["original_filename"] or o["uuid"],
+            "date": o["photos_date"] or "",
             "orig": f"{folder}/{orig}",
             "edit": f"{folder}/{edit}",
-            "origInfo": f"{loser['width']}x{loser['height']}, {(loser['file_size'] or 0) / 1e6:.1f} MB",
-            "editInfo": f"{keeper['width']}x{keeper['height']}, {(keeper['file_size'] or 0) / 1e6:.1f} MB",
+            "origInfo": f"{o['width']}x{o['height']}, {(o['file_size'] or 0) / 1e6:.1f} MB",
+            "editInfo": f"{e['width']}x{e['height']}, {(e['file_size'] or 0) / 1e6:.1f} MB",
+            "diff": _describe(d) if d else "",
+            "score": float(d["score"]) if d else 0.0,
             "present": (root / REVIEW_DIR / folder / orig).exists() and (root / REVIEW_DIR / folder / edit).exists(),
         })
-    out.sort(key=lambda e: (e["date"], e["name"]))
+    if diffs is not None:
+        out.sort(key=lambda x: (-x["score"], x["date"], x["name"]))
+    else:
+        out.sort(key=lambda x: (x["date"], x["name"]))
     return out
 
 
-def write_review_page(conn: Connection, rows: list[dict], root: Path) -> tuple[Path, int, int]:
+def _describe(d: dict) -> str:
+    parts = []
+    if d.get("rotated") == "True":
+        parts.append("rotated")
+    if d.get("reshaped") == "True":
+        parts.append("cropped")
+    parts.append(f"pixel difference {float(d['mad']):.1f}, brightness shift {float(d['shift']):.1f}, "
+                 f"contrast x{float(d['contrast']):.2f}")
+    if d.get("gps_lost") == "True":
+        parts.append("edit lost GPS")
+    return "; ".join(parts)
+
+
+def write_review_page(conn: Connection, rows: list[dict], root: Path,
+                      diffs: dict[str, dict] | None = None) -> tuple[Path, int, int]:
     """Write the page; returns (path, pairs, pairs whose copies are missing)."""
-    entries = review_entries(conn, rows, root)
+    entries = review_entries(conn, rows, root, diffs)
     dest = root / REVIEW_DIR / PAGE
     dest.parent.mkdir(parents=True, exist_ok=True)
     data = json.dumps(entries).replace("</", "<\\/")
@@ -82,6 +109,7 @@ main { padding:12px 16px 80px; display:grid; gap:12px; }
 .pair figcaption { color:var(--muted); font-size:12px; margin-top:4px; }
 .pair figcaption b { color:var(--fg); font-weight:600; }
 .pair .act { margin-top:8px; }
+.pair .df { color:var(--muted); font-size:12px; margin-top:6px; }
 .pair .act button { font:inherit; padding:5px 10px; border-radius:6px; border:1px solid var(--line); background:var(--bg); color:var(--fg); cursor:pointer; }
 .pair.flag .act button { border-color:var(--flag); color:var(--flag); }
 .missing { color:var(--flag); }
@@ -101,7 +129,7 @@ main { padding:12px 16px 80px; display:grid; gap:12px; }
   <select id="size"><option value="240px">Small</option><option value="340px" selected>Medium</option><option value="520px">Large</option></select>
   <button id="export">Download marked CSV</button>
   <button id="clear">Clear marks</button>
-  <div class="keys">j / k next and previous. x marks "keep the original too". z zooms the pair full screen; in zoom, space flips between original and edit. Marks are saved in this browser.</div>
+  <div class="keys">j / k next and previous. x marks a pair "keep both", so neither copy is removed. z zooms the pair full screen; in zoom, space flips between original and edit. Marks are saved in this browser.</div>
 </header>
 <main id="list"></main>
 <div id="zoom"></div>
@@ -120,14 +148,16 @@ function card(e, i) {
   el.dataset.i = i;
   el.innerHTML = `<div class="top"><span class="n"></span><span class="d"></span></div>
     <div class="imgs">
-      <figure><img loading="lazy" data-k="orig"><figcaption><b>Original</b> (would be removed) <span class="oi"></span></figcaption></figure>
-      <figure><img loading="lazy" data-k="edit"><figcaption><b>Google edit</b> (kept) <span class="ei"></span></figcaption></figure>
+      <figure><img loading="lazy" data-k="orig"><figcaption><b>Original</b> (${e.kept === "orig" ? "kept" : "would be removed"}) <span class="oi"></span></figcaption></figure>
+      <figure><img loading="lazy" data-k="edit"><figcaption><b>Google edit</b> (${e.kept === "edit" ? "kept" : "would be removed"}) <span class="ei"></span></figcaption></figure>
     </div>
+    <div class="df"></div>
     <div class="act"><button></button>${e.present ? "" : ' <span class="missing">copies missing on the drive</span>'}</div>`;
   el.querySelector(".n").textContent = e.name;
   el.querySelector(".d").textContent = e.date.replace("T", " ");
   el.querySelector(".oi").textContent = e.origInfo;
   el.querySelector(".ei").textContent = e.editInfo;
+  el.querySelector(".df").textContent = e.diff;
   const [a, b] = el.querySelectorAll("img");
   a.src = encodeURI(e.orig); b.src = encodeURI(e.edit);
   a.onclick = b.onclick = () => { cur = i; openZoom(); };
@@ -136,7 +166,7 @@ function card(e, i) {
   return el;
 }
 function label(el, e) {
-  el.querySelector(".act button").textContent = marks.has(e.loser) ? "Marked: keep the original too (x to undo)" : "Keep the original too (x)";
+  el.querySelector(".act button").textContent = marks.has(e.loser) ? "Marked: keep both (x to undo)" : "Keep both (x)";
 }
 function render() {
   const v = document.getElementById("view").value;

@@ -13,7 +13,7 @@ def test_losers_are_archived_with_their_own_manifest_and_review_copies(conn, tmp
     root = tmp_path / "drive"
     (root).mkdir()
     (root / "manifest.csv").write_text("the old catalog's manifest\n")
-    rows = [{"keeper": "keep", "loser": "lose", "why": "test", "review_original": "1"}]
+    rows = [{"keeper": "keep", "loser": "lose", "why": "test", "edit_pair": "1"}]
     r = run_pair_archive(conn, rows, root, manifest_name="manifest-new.csv", free_bytes=BIG)
     assert r.copied == 1 and not r.missing and r.review_copies == 2
     dest = root / "2014/05/lose_IMG_1.jpg"
@@ -30,7 +30,7 @@ def test_losers_are_archived_with_their_own_manifest_and_review_copies(conn, tmp
 def test_rerun_copies_nothing(conn, tmp_path):  # noqa: F811
     add_asset(conn, "keep", tmp_path)
     add_asset(conn, "lose", tmp_path)
-    rows = [{"keeper": "keep", "loser": "lose", "why": "", "review_original": ""}]
+    rows = [{"keeper": "keep", "loser": "lose", "why": "", "edit_pair": ""}]
     run_pair_archive(conn, rows, tmp_path / "d", manifest_name="m.csv", free_bytes=BIG)
     r = run_pair_archive(conn, rows, tmp_path / "d", manifest_name="m.csv", free_bytes=BIG)
     assert r.copied == 0 and r.skipped == 1
@@ -39,8 +39,8 @@ def test_rerun_copies_nothing(conn, tmp_path):  # noqa: F811
 def test_unknown_or_missing_loser_leaves_the_stage_open(conn, tmp_path):  # noqa: F811
     add_asset(conn, "keep", tmp_path)
     add_asset(conn, "lose", tmp_path).unlink()
-    rows = [{"keeper": "keep", "loser": "lose", "why": "", "review_original": ""},
-            {"keeper": "keep", "loser": "ghost", "why": "", "review_original": ""}]
+    rows = [{"keeper": "keep", "loser": "lose", "why": "", "edit_pair": ""},
+            {"keeper": "keep", "loser": "ghost", "why": "", "edit_pair": ""}]
     r = run_pair_archive(conn, rows, tmp_path / "d", manifest_name="m.csv", free_bytes=BIG)
     assert r.missing == ["lose"] and r.unknown == ["ghost"]
     assert get_stage(conn, "archive")["status"] == "running"

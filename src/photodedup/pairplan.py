@@ -6,9 +6,11 @@ or take whole hours: one import shifted the clock by a timezone, and a shift of
 exactly N hours is that, not a different moment. Anything else is left for
 review. Pure: the caller reads the catalog and writes the files.
 
-The keeper is Google's edited copy when there is one (the user chose to keep
-what they saw in Google Photos), then the largest, then the one whose date is
-right, then the oldest import. A member edited in Apple Photos since import is
+The keeper is a copy Google did not edit when there is one: measured over the
+library, a Google `-edited` file is the same picture or a light auto-enhance,
+re-saved at lower JPEG quality and sometimes without its GPS. Then the largest,
+then the one whose date is right, then the oldest import. The edit is archived
+and flagged as an edit pair so a visible change can still be reviewed. A member edited in Apple Photos since import is
 never a loser: that edit exists nowhere else.
 
 The date is the camera's EXIF time, or the filename's time when there is no
@@ -66,7 +68,7 @@ class SetPlan:
     losers: list[Member] = field(default_factory=list)
     kept_also: list[Member] = field(default_factory=list)
     date: datetime | None = None     # write this to the keeper, or None to leave it
-    review_original: Member | None = None
+    edit_pair: Member | None = None   # the edited loser to show beside the keeper
 
 
 def _whole_hours(delta: timedelta) -> bool:
@@ -113,7 +115,7 @@ def plan_set(set_id: int, members: Sequence[Member]) -> SetPlan:
 
     keeper = min(
         members,
-        key=lambda m: (not is_edited(m.filename), -(m.width * m.height), not right(m),
+        key=lambda m: (is_edited(m.filename), -(m.width * m.height), not right(m),
                        m.date_added, -m.file_size, m.uuid),
     )
     others = [m for m in members if m is not keeper]
@@ -123,9 +125,9 @@ def plan_set(set_id: int, members: Sequence[Member]) -> SetPlan:
     if not right(keeper):
         # The time a correct copy shows, so the keeper matches it exactly.
         plan.date = min((m for m in members if right(m)), key=lambda m: abs(m.photos_date - truth)).photos_date
-    originals = [m for m in losers if not is_edited(m.filename)]
-    if is_edited(keeper.filename) and originals:
-        plan.review_original = min(originals, key=lambda m: (-(m.width * m.height), -m.file_size, m.uuid))
+    edits = [m for m in losers if is_edited(m.filename)]
+    if not is_edited(keeper.filename) and edits:
+        plan.edit_pair = min(edits, key=lambda m: (-(m.width * m.height), -m.file_size, m.uuid))
     if not losers:
         plan.status, plan.reason = "review", "every other copy was edited in Photos; nothing to remove"
     return plan

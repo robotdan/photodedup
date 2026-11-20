@@ -25,7 +25,8 @@ from photodedup.catalog import (
 from photodedup.grouping import HashStageIncomplete, run_group
 from photodedup.hash_stage import HashStageInterrupted, run_hash
 from photodedup.library import LibraryUnavailable, album_members, iter_assets, iter_paths, read_states
-from photodedup.pairarchive import archived, read_pairs_rows, run_pair_archive
+from photodedup.editdiff import measure
+from photodedup.pairarchive import archived, read_pairs_rows, run_pair_archive, split_pair
 from photodedup.pairplan import plan_catalog
 from photodedup.reviewpage import write_review_page
 from photodedup.pairs import PAIRS_ALBUM, PairResult, read_pairs, resolve_pairs
@@ -491,13 +492,13 @@ def plan_pairs(catalog: Path, out: Path, dates_out: Path, review_out: Path, excl
         f.parent.mkdir(parents=True, exist_ok=True)
     with out.open("w", newline="") as fh:
         w = csv.writer(fh)
-        w.writerow(["keeper", "loser", "filename", "why", "review_original"])
+        w.writerow(["keeper", "loser", "filename", "why", "edit_pair"])
         for p in planned:
             k = p.keeper
             for m in p.losers:
                 why = (f"set {p.set_id}; keeper {k.filename} {k.width}x{k.height} added {k.date_added[:10]}; "
                        f"loser {m.width}x{m.height} dated {m.photos_date} added {m.date_added[:10]}")
-                w.writerow([k.uuid, m.uuid, m.filename, why, "1" if m is p.review_original else ""])
+                w.writerow([k.uuid, m.uuid, m.filename, why, "1" if m is p.edit_pair else ""])
     with dates_out.open("w", newline="") as fh:
         w = csv.writer(fh)
         w.writerow(["uuid", "date", "filename", "was"])
@@ -520,7 +521,7 @@ def plan_pairs(catalog: Path, out: Path, dates_out: Path, review_out: Path, excl
     click.echo(
         f"{len(planned)} sets planned: {sum(len(p.losers) for p in planned)} losers in {out}, "
         f"{sum(p.date is not None for p in planned)} keeper dates in {dates_out}, "
-        f"{sum(p.review_original is not None for p in planned)} edit pairs for side-by-side review, "
+        f"{sum(p.edit_pair is not None for p in planned)} edit pairs for side-by-side review, "
         f"{kept} copies kept because they were edited in Photos"
     )
     click.echo(f"{len(plans) - len(planned)} sets left for review in {review_out}")
@@ -562,13 +563,51 @@ def archive_pairs(pairs_csv: Path, catalog: Path, root: Path) -> None:
     click.echo(f"archive stage: {stage['status'] if stage is not None else 'unknown'}")
 
 
+@main.command("measure-edits")
+@click.argument("pairs_csv", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--catalog", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=True)
+@click.option("--out", type=click.Path(path_type=Path), required=True)
+def measure_edits(pairs_csv: Path, catalog: Path, out: Path) -> None:
+    """Measure how each edit pair's Google edit differs from its original
+    (pixels, brightness, contrast, crop, GPS). Reads the library; writes a CSV."""
+    conn = open_catalog(catalog)
+    rows = [r for r in read_pairs_rows(pairs_csv) if r.get("edit_pair") == "1"]
+    fields = ["loser", "keeper", "filename", "mad", "shift", "contrast", "reshaped", "rotated", "gps_lost", "visible", "score"]
+    out.parent.mkdir(parents=True, exist_ok=True)
+    visible = failed = 0
+    with out.open("w", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=fields)
+        w.writeheader()
+        for i, r in enumerate(rows, start=1):
+            k = conn.execute("SELECT * FROM asset WHERE uuid = ?", (r["keeper"],)).fetchone()
+            lo = conn.execute("SELECT * FROM asset WHERE uuid = ?", (r["loser"],)).fetchone()
+            if k is None or lo is None:
+                failed += 1
+                continue
+            o, e = split_pair(k, lo)
+            try:
+                d = measure(Path(o["path"]), Path(e["path"]))
+            except (OSError, ValueError) as exc:
+                failed += 1
+                click.echo(f"  could not measure {o['original_filename']}: {exc}", err=True)
+                continue
+            visible += d.visible
+            w.writerow({"loser": r["loser"], "keeper": r["keeper"], "filename": o["original_filename"], **d.row()})
+            if i % 200 == 0:
+                click.echo(f"  {i}/{len(rows)}", err=True)
+    click.echo(f"{len(rows) - failed} pairs measured, {visible} visibly different, {failed} not measured; {out}")
+
+
 @main.command("review-page")
 @click.argument("pairs_csv", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option("--catalog", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=True)
 @click.option("--root", type=click.Path(path_type=Path), default=DEFAULT_ARCHIVE, show_default=True)
-def review_page(pairs_csv: Path, catalog: Path, root: Path) -> None:
+@click.option("--diffs", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None,
+              help="A measure-edits CSV: show only pairs that visibly differ, largest difference first.")
+def review_page(pairs_csv: Path, catalog: Path, root: Path, diffs: Path | None) -> None:
     """Write edits-review/index.html: the edit pairs side by side, with marks
-    for originals to keep, exported as a CSV for `pairs --keep`."""
-    dest, total, missing = write_review_page(open_catalog(catalog), read_pairs_rows(pairs_csv), root)
+    for pairs to keep both of, exported as a CSV for `pairs --keep`."""
+    measured = {r["loser"]: r for r in read_pairs_rows(diffs)} if diffs else None
+    dest, total, missing = write_review_page(open_catalog(catalog), read_pairs_rows(pairs_csv), root, measured)
     click.echo(f"{total} pairs in {dest}" + (f"; {missing} have copies missing on the drive" if missing else ""))
     click.echo(f"open it with: open {shlex.quote(str(dest))}")
