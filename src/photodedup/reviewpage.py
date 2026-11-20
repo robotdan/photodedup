@@ -5,8 +5,8 @@ differs (a crop, a rotation, or a measurable color change), largest first.
 
 Writes edits-review/index.html next to the side-by-side copies `archive-pairs`
 made. The page loads the images by relative path, so it works straight from
-the drive with no server. Marks are kept in the browser's localStorage and
-exported as a CSV of loser uuids whose original should stay in the library.
+the drive with no server. Choices (keep the original, the edit, or both) are kept in the browser's
+localStorage and exported as a CSV for `pairs --choices`.
 """
 
 from __future__ import annotations
@@ -110,8 +110,9 @@ main { padding:12px 16px 80px; display:grid; gap:12px; }
 .pair figcaption b { color:var(--fg); font-weight:600; }
 .pair .act { margin-top:8px; }
 .pair .df { color:var(--muted); font-size:12px; margin-top:6px; }
-.pair .act button { font:inherit; padding:5px 10px; border-radius:6px; border:1px solid var(--line); background:var(--bg); color:var(--fg); cursor:pointer; }
-.pair.flag .act button { border-color:var(--flag); color:var(--flag); }
+.pair .act { display:flex; flex-wrap:wrap; gap:6px 16px; align-items:center; }
+.pair .act label { display:flex; gap:5px; align-items:center; cursor:pointer; }
+.pair.flag .act label.on { color:var(--flag); font-weight:600; }
 .missing { color:var(--flag); }
 #zoom { position:fixed; inset:0; background:#000e; display:none; z-index:10; }
 #zoom.on { display:grid; grid-template-columns:1fr 1fr; gap:4px; }
@@ -125,26 +126,33 @@ main { padding:12px 16px 80px; display:grid; gap:12px; }
 <header>
   <h1>Edit pair review</h1>
   <span class="stat" id="stat"></span>
-  <select id="view"><option value="all">All pairs</option><option value="flag">Marked only</option><option value="sample">Random 50</option></select>
+  <select id="view"><option value="all">All pairs</option><option value="flag">Changed only</option><option value="sample">Random 50</option></select>
   <select id="size"><option value="240px">Small</option><option value="340px" selected>Medium</option><option value="520px">Large</option></select>
-  <button id="export">Download marked CSV</button>
-  <button id="clear">Clear marks</button>
-  <div class="keys">j / k next and previous. x marks a pair "keep both", so neither copy is removed. z zooms the pair full screen; in zoom, space flips between original and edit. Marks are saved in this browser.</div>
+  <button id="export">Download choices CSV</button>
+  <button id="clear">Reset all choices</button>
+  <div class="keys">j / k next and previous. o keeps the original, e keeps the Google edit, b keeps both. Pairs you change are highlighted. z zooms the pair full screen; in zoom, space flips between original and edit. Choices are saved in this browser.</div>
 </header>
 <main id="list"></main>
 <div id="zoom"></div>
 <script>
 const DATA = /*DATA*/[];
 const KEY = "photodedup-edit-review";
-let marks = new Set();
-try { marks = new Set(JSON.parse(localStorage.getItem(KEY) || "[]")); } catch (e) {}
-const save = () => { try { localStorage.setItem(KEY, JSON.stringify([...marks])); } catch (e) {} };
+// loser uuid -> "orig" | "edit" | "both"; absent means the plan's choice.
+let picks = {};
+try {
+  const raw = JSON.parse(localStorage.getItem(KEY) || "{}");
+  picks = Array.isArray(raw) ? Object.fromEntries(raw.map(u => [u, "both"])) : raw;
+} catch (e) {}
+const save = () => { try { localStorage.setItem(KEY, JSON.stringify(picks)); } catch (e) {} };
+const pick = e => picks[e.loser] || e.kept;
+const changed = e => pick(e) !== e.kept;
+const NAMES = { orig: "Keep original", edit: "Keep Google edit", both: "Keep both" };
 const list = document.getElementById("list"), stat = document.getElementById("stat"), zoom = document.getElementById("zoom");
 let shown = [], cur = 0, sample = null;
 
 function card(e, i) {
   const el = document.createElement("section");
-  el.className = "pair" + (marks.has(e.loser) ? " flag" : "");
+  el.className = "pair" + (changed(e) ? " flag" : "");
   el.dataset.i = i;
   el.innerHTML = `<div class="top"><span class="n"></span><span class="d"></span></div>
     <div class="imgs">
@@ -152,7 +160,7 @@ function card(e, i) {
       <figure><img loading="lazy" data-k="edit"><figcaption><b>Google edit</b> (${e.kept === "edit" ? "kept" : "would be removed"}) <span class="ei"></span></figcaption></figure>
     </div>
     <div class="df"></div>
-    <div class="act"><button></button>${e.present ? "" : ' <span class="missing">copies missing on the drive</span>'}</div>`;
+    <div class="act">${["orig", "edit", "both"].map(v => `<label data-v="${v}"><input type="radio" name="p${i}" value="${v}">${NAMES[v]}${v === e.kept ? " (plan)" : ""}</label>`).join("")}${e.present ? "" : ' <span class="missing">copies missing on the drive</span>'}</div>`;
   el.querySelector(".n").textContent = e.name;
   el.querySelector(".d").textContent = e.date.replace("T", " ");
   el.querySelector(".oi").textContent = e.origInfo;
@@ -161,12 +169,16 @@ function card(e, i) {
   const [a, b] = el.querySelectorAll("img");
   a.src = encodeURI(e.orig); b.src = encodeURI(e.edit);
   a.onclick = b.onclick = () => { cur = i; openZoom(); };
-  el.querySelector("button").onclick = () => { cur = i; toggle(); };
+  el.querySelectorAll("input").forEach(r => r.onchange = () => { cur = i; choose(r.value); });
   label(el, e);
   return el;
 }
 function label(el, e) {
-  el.querySelector(".act button").textContent = marks.has(e.loser) ? "Marked: keep both (x to undo)" : "Keep both (x)";
+  el.querySelectorAll(".act label").forEach(l => {
+    const on = l.dataset.v === pick(e);
+    l.classList.toggle("on", on);
+    l.querySelector("input").checked = on;
+  });
 }
 function render() {
   const v = document.getElementById("view").value;
@@ -175,7 +187,7 @@ function render() {
     shown = sample.map(i => DATA[i]);
   } else {
     sample = null;
-    shown = v === "flag" ? DATA.filter(e => marks.has(e.loser)) : DATA;
+    shown = v === "flag" ? DATA.filter(changed) : DATA;
   }
   list.replaceChildren(...shown.map(card));
   cur = Math.min(cur, Math.max(0, shown.length - 1));
@@ -184,7 +196,7 @@ function render() {
 }
 function count() {
   const missing = DATA.filter(e => !e.present).length;
-  stat.textContent = `${shown.length} shown of ${DATA.length} pairs · ${marks.size} marked` + (missing ? ` · ${missing} missing` : "");
+  stat.textContent = `${shown.length} shown of ${DATA.length} pairs · ${DATA.filter(changed).length} changed from the plan` + (missing ? ` · ${missing} missing` : "");
 }
 function focus(scroll = true) {
   list.querySelectorAll(".pair.cur").forEach(x => x.classList.remove("cur"));
@@ -193,12 +205,12 @@ function focus(scroll = true) {
   el.classList.add("cur");
   if (scroll) el.scrollIntoView({ block: "center", behavior: "smooth" });
 }
-function toggle() {
+function choose(v) {
   const e = shown[cur]; if (!e) return;
-  marks.has(e.loser) ? marks.delete(e.loser) : marks.add(e.loser);
+  if (v === e.kept) delete picks[e.loser]; else picks[e.loser] = v;
   save();
   const el = list.children[cur];
-  el.classList.toggle("flag", marks.has(e.loser));
+  el.classList.toggle("flag", changed(e));
   label(el, e);
   count();
 }
@@ -224,17 +236,21 @@ document.addEventListener("keydown", ev => {
   if (zoomed && ev.key === " ") { ev.preventDefault(); flipZoom(); return; }
   if (ev.key === "j") { cur = Math.min(cur + 1, shown.length - 1); focus(); if (zoomed) openZoom(); }
   else if (ev.key === "k") { cur = Math.max(cur - 1, 0); focus(); if (zoomed) openZoom(); }
-  else if (ev.key === "x") toggle();
+  else if (ev.key === "o") choose("orig");
+  else if (ev.key === "e") choose("edit");
+  else if (ev.key === "b") choose("both");
   else if (ev.key === "z") zoomed ? (zoom.className = "") : openZoom();
 });
 document.getElementById("view").onchange = () => { cur = 0; render(); };
 document.getElementById("size").onchange = ev => document.documentElement.style.setProperty("--h", ev.target.value);
-document.getElementById("clear").onclick = () => { if (confirm("Clear all marks?")) { marks.clear(); save(); render(); } };
+document.getElementById("clear").onclick = () => { if (confirm("Reset every pair to the plan?")) { picks = {}; save(); render(); } };
 document.getElementById("export").onclick = () => {
-  const rows = ["loser,keeper,filename", ...DATA.filter(e => marks.has(e.loser)).map(e => `${e.loser},${e.keeper},"${e.name.replace(/"/g, '""')}"`)];
+  // choice: "swap" keeps the planned loser instead of the keeper; "both" keeps the two.
+  const rows = ["loser,keeper,choice,filename", ...DATA.filter(changed).map(e =>
+    `${e.loser},${e.keeper},${pick(e) === "both" ? "both" : "swap"},"${e.name.replace(/"/g, '""')}"`)];
   const a = document.createElement("a");
   a.href = URL.createObjectURL(new Blob([rows.join("\n") + "\n"], { type: "text/csv" }));
-  a.download = "keep_originals.csv";
+  a.download = "pair_choices.csv";
   a.click();
 };
 render();

@@ -29,7 +29,7 @@ from photodedup.editdiff import measure
 from photodedup.pairarchive import archived, read_pairs_rows, run_pair_archive, split_pair
 from photodedup.pairplan import plan_catalog
 from photodedup.reviewpage import write_review_page
-from photodedup.pairs import PAIRS_ALBUM, PairResult, read_pairs, resolve_pairs
+from photodedup.pairs import PAIRS_ALBUM, PairResult, apply_choices, read_pairs, resolve_pairs, swap_dates
 from photodedup.photos_write import PhotosUnavailable, PhotoscriptWriter
 from photodedup.report import duplicate_report, survey_report
 from photodedup.review import write_review
@@ -437,9 +437,10 @@ def verify(catalog: Path, out: Path) -> None:
 @click.option("--log", type=click.Path(path_type=Path), default=Path("reports/pairs_result.csv"), show_default=True)
 @click.option("--archived-in", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None,
               help="Catalog whose archive must hold each loser's verified original; losers without one are skipped.")
-@click.option("--keep", "keeps", multiple=True, type=click.Path(exists=True, dir_okay=False, path_type=Path),
-              help="CSV with a loser column (the review page's export); those losers stay in the library. Repeatable.")
-def pairs(pairs_csv: Path, dry_run: bool, log: Path, archived_in: Path | None, keeps: tuple[Path, ...]) -> None:
+@click.option("--choices", "--keep", "choice_files", multiple=True,
+              type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              help="The review page's choices CSV (loser, choice = swap or both). A row with no choice keeps both. Repeatable.")
+def pairs(pairs_csv: Path, dry_run: bool, log: Path, archived_in: Path | None, choice_files: tuple[Path, ...]) -> None:
     """Resolve hand-picked duplicate pairs (CSV with keeper,loser columns):
     copy each loser's albums, keywords, favorite and captions onto its keeper,
     confirm, then put the loser in the 'Dedup Delete pairs' album. Never
@@ -448,9 +449,15 @@ def pairs(pairs_csv: Path, dry_run: bool, log: Path, archived_in: Path | None, k
         chosen = read_pairs(pairs_csv)
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
-    keep = {r["loser"] for f in keeps for r in read_pairs_rows(f)}
-    kept = [PairResult(p, "skipped", "kept after review") for p in chosen if p.loser in keep]
-    chosen = [p for p in chosen if p.loser not in keep]
+    choices = {r["loser"]: (r.get("choice") or "both").strip() for f in choice_files for r in read_pairs_rows(f)}
+    try:
+        chosen, both = apply_choices(chosen, choices)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    kept = [PairResult(p, "skipped", "both kept after review") for p in both]
+    swapped = sum(c == "swap" for c in choices.values())
+    if choices:
+        click.echo(f"review choices: {len(both)} pairs keep both, {swapped} swapped to keep the other copy")
     unarchived: list[PairResult] = []
     if archived_in is not None:
         have = archived(open_catalog(archived_in), [p.loser for p in chosen])
@@ -561,6 +568,38 @@ def archive_pairs(pairs_csv: Path, catalog: Path, root: Path) -> None:
         click.echo(f"  not archived: {u}")
     stage = get_stage(conn, "archive")
     click.echo(f"archive stage: {stage['status'] if stage is not None else 'unknown'}")
+
+
+@main.command("choice-dates")
+@click.argument("pairs_csv", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--catalog", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=True)
+@click.option("--dates", "dates_csv", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=True,
+              help="The plan-pairs dates CSV.")
+@click.option("--choices", "choice_files", multiple=True, required=True,
+              type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--out", type=click.Path(path_type=Path), required=True)
+def choice_dates(pairs_csv: Path, catalog: Path, dates_csv: Path, choice_files: tuple[Path, ...], out: Path) -> None:
+    """Rewrite the dates CSV for review choices: a copy swapped in as keeper
+    gets the time the planned keeper would have shown."""
+    conn = open_catalog(catalog)
+    chosen = read_pairs(pairs_csv)
+    choices = {r["loser"]: (r.get("choice") or "both").strip() for f in choice_files for r in read_pairs_rows(f)}
+    rows = {r["uuid"]: r for r in read_pairs_rows(dates_csv)}
+    uuids = sorted({u for p in chosen for u in (p.keeper, p.loser)})
+    shown = {}
+    for i in range(0, len(uuids), 500):
+        chunk = uuids[i:i + 500]
+        shown.update((r[0], r[1]) for r in conn.execute(
+            f"SELECT uuid, photos_date FROM asset WHERE uuid IN ({','.join('?' * len(chunk))})", chunk))
+    final = swap_dates(chosen, choices, {u: r["date"] for u, r in rows.items()}, shown)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with out.open("w", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(["uuid", "date", "was"])
+        for u, d in sorted(final.items()):
+            w.writerow([u, d, (shown.get(u) or "")[:19]])
+    added = len(set(final) - set(rows))
+    click.echo(f"{len(final)} dates in {out}: {added} for swapped keepers, {len(set(rows) - set(final))} dropped")
 
 
 @main.command("measure-edits")

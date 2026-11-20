@@ -3,7 +3,7 @@ from datetime import datetime
 import pytest
 
 from photodedup.apply import FOLDER
-from photodedup.pairs import PAIRS_ALBUM, Pair, read_pairs, resolve_pairs
+from photodedup.pairs import PAIRS_ALBUM, Pair, apply_choices, read_pairs, resolve_pairs, swap_dates
 from tests.fake_photos import FakePhotos
 
 
@@ -81,3 +81,25 @@ def test_read_pairs_refuses_bad_input(tmp_path, body):
     f.write_text(body)
     with pytest.raises(ValueError):
         read_pairs(f)
+
+
+def test_choices_swap_and_keep_both():
+    pairs = [Pair("o", "e"), Pair("o", "o1"), Pair("x", "xe")]
+    out, both = apply_choices(pairs, {"e": "swap", "xe": "both"})
+    assert out == [Pair("e", "o"), Pair("e", "o1")] and both == [Pair("x", "xe")]
+
+
+def test_choices_refuse_two_swaps_in_one_set():
+    with pytest.raises(ValueError):
+        apply_choices([Pair("o", "e"), Pair("o", "e2")], {"e": "swap", "e2": "swap"})
+
+
+def test_swapped_keeper_takes_the_old_keepers_final_time():
+    pairs = [Pair("o", "e"), Pair("p", "f"), Pair("q", "g")]
+    shown = {"o": "2014-01-01T08:00:00", "e": "2014-01-01T10:00:00",
+             "p": "2014-01-01T10:00:00", "f": "2014-01-01T10:00:00", "q": "2014-01-01T09:00:00"}
+    dates = {"o": "2014-01-01T10:00:00", "q": "2014-01-01T10:00:00"}
+    out = swap_dates(pairs, {"e": "swap", "f": "swap", "g": "both"}, dates, shown)
+    assert out == {"q": "2014-01-01T10:00:00"}
+    shown["e"] = "2014-01-01T07:00:00"
+    assert swap_dates(pairs, {"e": "swap"}, dates, shown)["e"] == "2014-01-01T10:00:00"
