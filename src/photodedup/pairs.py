@@ -118,8 +118,11 @@ def resolve_pairs(writer: PhotosWriter, pairs: list[Pair], *, dry_run: bool = Fa
 def _resolve_one(writer: PhotosWriter, pair: Pair, dry_run: bool, staging: list[str],
                  sleep: Callable[[float], None]) -> PairResult:
     if not (writer.exists(pair.keeper) and writer.exists(pair.loser)):
-        return PairResult(pair, "skipped", "keeper or loser no longer in the library")
-    keeper, loser = writer.get(pair.keeper), writer.get(pair.loser)
+        return PairResult(pair, "skipped", "keeper or loser is not in the library (gone, trashed, or Shared with You)")
+    try:
+        keeper, loser = writer.get(pair.keeper), writer.get(pair.loser)
+    except Exception as exc:
+        return PairResult(pair, "failed", f"could not read the pair: {type(exc).__name__}: {exc}")
     if PAIRS_ALBUM in keeper.albums:
         return PairResult(pair, "failed", "keeper is in the staging album; fix that by hand first")
     albums = [a for a in loser.albums if a != PAIRS_ALBUM and a not in keeper.albums]

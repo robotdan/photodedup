@@ -121,3 +121,17 @@ def test_a_write_photos_commits_late_is_waited_for():
     naps = []
     [r] = resolve_pairs(fake, [Pair("new", "old")], sleep=naps.append)
     assert r.status == "staged" and naps
+
+
+def test_an_unreadable_photo_fails_its_pair_and_the_run_goes_on():
+    fake = FakePhotos({"old": {}, "new": {}, "x": {}, "y": {}})
+    real_get = fake.get
+
+    def get(uuid):
+        if uuid == "y":
+            raise ValueError("Invalid photo id: y")
+        return real_get(uuid)
+
+    fake.get = get
+    a, b = resolve_pairs(fake, [Pair("x", "y"), Pair("new", "old")])
+    assert a.status == "failed" and "Invalid photo id" in a.detail and b.status == "staged"

@@ -13,6 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 
+SHARED_WITH_YOU = 12
 DEFAULT_LIBRARY = Path.home() / "Pictures" / "Photos Library.photoslibrary"
 
 
@@ -74,11 +75,14 @@ class LibraryIndex:
         # Without the hint SQLite walks a trash-state index (13 ms a call).
         try:
             row = self._conn.execute(
-                "SELECT ZTRASHEDSTATE FROM ZASSET INDEXED BY Z_Asset_byUuidIndex WHERE ZUUID = ?", (uuid,)
+                "SELECT ZTRASHEDSTATE, ZSAVEDASSETTYPE FROM ZASSET INDEXED BY Z_Asset_byUuidIndex WHERE ZUUID = ?", (uuid,)
             ).fetchone()
         except sqlite3.OperationalError:
-            row = self._conn.execute("SELECT ZTRASHEDSTATE FROM ZASSET WHERE ZUUID = ?", (uuid,)).fetchone()
-        return row is not None and not row[0]
+            row = self._conn.execute("SELECT ZTRASHEDSTATE, ZSAVEDASSETTYPE FROM ZASSET WHERE ZUUID = ?",
+                                     (uuid,)).fetchone()
+        # Saved-asset type 12 is a "Shared with You" item from Messages: it sits
+        # in the database but outside the library AppleScript can reach.
+        return row is not None and not row[0] and row[1] != SHARED_WITH_YOU
 
     def albums(self, uuid: str) -> tuple[str, ...]:
         """Names of the user albums (any folder) that hold the photo."""
