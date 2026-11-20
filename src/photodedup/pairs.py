@@ -10,6 +10,8 @@ pairs come from photos imported after the survey, which it does not know.
 from __future__ import annotations
 
 import csv
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -83,62 +85,90 @@ def apply_choices(pairs: list[Pair], choices: dict[str, str]) -> tuple[list[Pair
     return out, dropped
 
 
-def resolve_pairs(writer: PhotosWriter, pairs: list[Pair], *, dry_run: bool = False) -> list[PairResult]:
-    results = []
-    staging = None
-    for pair in pairs:
-        if not (writer.exists(pair.keeper) and writer.exists(pair.loser)):
-            results.append(PairResult(pair, "skipped", "keeper or loser no longer in the library"))
-            continue
-        keeper, loser = writer.get(pair.keeper), writer.get(pair.loser)
-        if PAIRS_ALBUM in keeper.albums:
-            results.append(PairResult(pair, "failed", "keeper is in the staging album; fix that by hand first"))
-            continue
-        albums = [a for a in loser.albums if a != PAIRS_ALBUM and a not in keeper.albums]
-        keywords = [k for k in loser.keywords if k not in keeper.keywords]
-        carries = []
-        if albums:
-            carries.append(f"albums {albums}")
+SETTLE_TRIES = 10
+SETTLE_PAUSE = 0.5
+
+
+def _settled(read: Callable[[], bool], sleep: Callable[[float], None]) -> bool:
+    """Photos commits an AppleScript write a moment after it returns; when
+    reads come from its database, poll briefly before calling a write lost."""
+    for attempt in range(SETTLE_TRIES):
+        if read():
+            return True
+        if attempt < SETTLE_TRIES - 1:
+            sleep(SETTLE_PAUSE)
+    return False
+
+
+def resolve_pairs(writer: PhotosWriter, pairs: list[Pair], *, dry_run: bool = False,
+                  progress: Callable[[int, int, dict[str, int]], None] | None = None,
+                  sleep: Callable[[float], None] = time.sleep) -> list[PairResult]:
+    results: list[PairResult] = []
+    counts: dict[str, int] = {}
+    staging: list[str] = []          # the staging album id, once created
+    for index, pair in enumerate(pairs, start=1):
+        r = _resolve_one(writer, pair, dry_run, staging, sleep)
+        results.append(r)
+        counts[r.status] = counts.get(r.status, 0) + 1
+        if progress and (index % 25 == 0 or index == len(pairs)):
+            progress(index, len(pairs), counts)
+    return results
+
+
+def _resolve_one(writer: PhotosWriter, pair: Pair, dry_run: bool, staging: list[str],
+                 sleep: Callable[[float], None]) -> PairResult:
+    if not (writer.exists(pair.keeper) and writer.exists(pair.loser)):
+        return PairResult(pair, "skipped", "keeper or loser no longer in the library")
+    keeper, loser = writer.get(pair.keeper), writer.get(pair.loser)
+    if PAIRS_ALBUM in keeper.albums:
+        return PairResult(pair, "failed", "keeper is in the staging album; fix that by hand first")
+    albums = [a for a in loser.albums if a != PAIRS_ALBUM and a not in keeper.albums]
+    keywords = [k for k in loser.keywords if k not in keeper.keywords]
+    carries = []
+    if albums:
+        carries.append(f"albums {albums}")
+    if keywords:
+        carries.append(f"keywords {keywords}")
+    if loser.favorite and not keeper.favorite:
+        carries.append("favorite")
+    if loser.title and not keeper.title:
+        carries.append("title")
+    if loser.description and not keeper.description:
+        carries.append("description")
+    detail = "carries " + ", ".join(carries) if carries else "carries nothing"
+    if dry_run:
+        return PairResult(pair, "skipped", f"dry run; {detail}")
+    try:
+        for name in albums:
+            writer.add_to_album(writer.ensure_album(name), [pair.keeper])
         if keywords:
-            carries.append(f"keywords {keywords}")
+            writer.set_keywords(pair.keeper, [*keeper.keywords, *keywords])
         if loser.favorite and not keeper.favorite:
-            carries.append("favorite")
+            writer.set_favorite(pair.keeper, True)
         if loser.title and not keeper.title:
-            carries.append("title")
+            writer.set_title(pair.keeper, loser.title)
         if loser.description and not keeper.description:
-            carries.append("description")
-        detail = "carries " + ", ".join(carries) if carries else "carries nothing"
-        if dry_run:
-            results.append(PairResult(pair, "skipped", f"dry run; {detail}"))
-            continue
-        try:
-            for name in albums:
-                writer.add_to_album(writer.ensure_album(name), [pair.keeper])
-            if keywords:
-                writer.set_keywords(pair.keeper, [*keeper.keywords, *keywords])
-            if loser.favorite and not keeper.favorite:
-                writer.set_favorite(pair.keeper, True)
-            if loser.title and not keeper.title:
-                writer.set_title(pair.keeper, loser.title)
-            if loser.description and not keeper.description:
-                writer.set_description(pair.keeper, loser.description)
+            writer.set_description(pair.keeper, loser.description)
+
+        missing: list[str] = []
+
+        def keeper_took_everything() -> bool:
             after = writer.get(pair.keeper)
-            missing = [a for a in albums if a not in after.albums] + [k for k in keywords if k not in after.keywords]
+            missing[:] = [a for a in albums if a not in after.albums] + [k for k in keywords if k not in after.keywords]
             if loser.favorite and not after.favorite:
                 missing.append("favorite")
-            if missing:
-                results.append(PairResult(pair, "failed", f"keeper did not take {missing}; loser not staged"))
-                continue
-            if staging is None:
-                staging = writer.ensure_album(PAIRS_ALBUM, FOLDER)
-            writer.add_to_album(staging, [pair.loser])
-            if PAIRS_ALBUM not in writer.get(pair.loser).albums:
-                results.append(PairResult(pair, "failed", f"{detail}; loser did not land in {PAIRS_ALBUM}"))
-                continue
-            results.append(PairResult(pair, "staged", detail))
-        except Exception as exc:
-            results.append(PairResult(pair, "failed", f"{type(exc).__name__}: {exc}"))
-    return results
+            return not missing
+
+        if not _settled(keeper_took_everything, sleep):
+            return PairResult(pair, "failed", f"keeper did not take {missing}; loser not staged")
+        if not staging:
+            staging.append(writer.ensure_album(PAIRS_ALBUM, FOLDER))
+        writer.add_to_album(staging[0], [pair.loser])
+        if not _settled(lambda: PAIRS_ALBUM in writer.get(pair.loser).albums, sleep):
+            return PairResult(pair, "failed", f"{detail}; loser did not land in {PAIRS_ALBUM}")
+        return PairResult(pair, "staged", detail)
+    except Exception as exc:
+        return PairResult(pair, "failed", f"{type(exc).__name__}: {exc}")
 
 
 def swap_dates(pairs: list[Pair], choices: dict[str, str], dates: dict[str, str],

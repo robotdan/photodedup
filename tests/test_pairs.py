@@ -103,3 +103,21 @@ def test_swapped_keeper_takes_the_old_keepers_final_time():
     assert out == {"q": "2014-01-01T10:00:00"}
     shown["e"] = "2014-01-01T07:00:00"
     assert swap_dates(pairs, {"e": "swap"}, dates, shown)["e"] == "2014-01-01T10:00:00"
+
+
+def test_a_write_photos_commits_late_is_waited_for():
+    fake = library()
+    real_get = fake.get
+    calls = {"n": 0}
+
+    def slow_get(uuid):
+        state = real_get(uuid)
+        if uuid == "old" and calls["n"] < 2:
+            calls["n"] += 1
+            return state.__class__(**{**state.__dict__, "albums": tuple(a for a in state.albums if a != PAIRS_ALBUM)})
+        return state
+
+    fake.get = slow_get
+    naps = []
+    [r] = resolve_pairs(fake, [Pair("new", "old")], sleep=naps.append)
+    assert r.status == "staged" and naps

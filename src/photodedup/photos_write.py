@@ -7,9 +7,13 @@ photoscript: its AppleScript compiles only inside a GUI session.
 
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Protocol
+
+DEFAULT_LIBRARY = Path.home() / "Pictures" / "Photos Library.photoslibrary"
 
 
 class PhotosUnavailable(RuntimeError):
@@ -39,10 +43,64 @@ class PhotosWriter(Protocol):
     def delete_album(self, album_id: str) -> None: ...
 
 
-class PhotoscriptWriter:
-    """photoscript-backed writer. Construct only from an interactive session."""
+class LibraryIndex:
+    """Read-only lookups in Photos.sqlite that AppleScript makes slow.
 
-    def __init__(self) -> None:
+    photoscript finds a photo's albums by listing every media item of every
+    album in the library, several seconds to minutes per call on a large
+    library. The database answers the same question in milliseconds. A fresh
+    statement on an autocommit connection sees Photos' latest commit.
+    """
+
+    def __init__(self, library: Path) -> None:
+        db = Path(library) / "database" / "Photos.sqlite"
+        self._conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=30)
+        self._join, self._album_col, self._asset_col = self._album_join()
+
+    def _album_join(self) -> tuple[str, str, str]:
+        # The join table's name carries Core Data entity numbers that move
+        # between Photos versions (Z_34ASSETS with Z_34ALBUMS and Z_3ASSETS here).
+        for (name,) in self._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'Z\\_%ASSETS' ESCAPE '\\'"
+        ):
+            cols = [r[1] for r in self._conn.execute(f"PRAGMA table_info({name})")]
+            albums = [c for c in cols if c.endswith("ALBUMS")]
+            assets = [c for c in cols if c.endswith("ASSETS")]
+            if albums and assets:
+                return name, albums[0], assets[0]
+        raise PhotosUnavailable("cannot find the album membership table in Photos.sqlite")
+
+    def exists(self, uuid: str) -> bool:
+        # Without the hint SQLite walks a trash-state index (13 ms a call).
+        try:
+            row = self._conn.execute(
+                "SELECT ZTRASHEDSTATE FROM ZASSET INDEXED BY Z_Asset_byUuidIndex WHERE ZUUID = ?", (uuid,)
+            ).fetchone()
+        except sqlite3.OperationalError:
+            row = self._conn.execute("SELECT ZTRASHEDSTATE FROM ZASSET WHERE ZUUID = ?", (uuid,)).fetchone()
+        return row is not None and not row[0]
+
+    def albums(self, uuid: str) -> tuple[str, ...]:
+        """Names of the user albums (any folder) that hold the photo."""
+        return tuple(sorted(r[0] for r in self._conn.execute(
+            # CROSS JOIN pins the order: start from the one photo, not from
+            # every album's member list.
+            f"""SELECT g.ZTITLE FROM ZASSET a
+                CROSS JOIN {self._join} j ON j.{self._asset_col} = a.Z_PK
+                CROSS JOIN ZGENERICALBUM g ON g.Z_PK = j.{self._album_col}
+                WHERE a.ZUUID = ? AND g.ZKIND = 2 AND g.ZTRASHEDSTATE = 0 AND g.ZTITLE IS NOT NULL""",
+            (uuid,),
+        )))
+
+
+class PhotoscriptWriter:
+    """photoscript-backed writer. Construct only from an interactive session.
+
+    With a library path, existence and album membership come from the
+    library's database (LibraryIndex) instead of AppleScript.
+    """
+
+    def __init__(self, library: Path | None = None) -> None:
         try:
             import photoscript
         except Exception as exc:
@@ -54,11 +112,14 @@ class PhotoscriptWriter:
         self._ps = photoscript
         self._lib = photoscript.PhotosLibrary()
         self._albums: dict[tuple[str | None, str], str] = {}
+        self._index = LibraryIndex(library) if library is not None else None
 
     def _photo(self, uuid: str):
         return self._ps.Photo(uuid)
 
     def exists(self, uuid: str) -> bool:
+        if self._index is not None:
+            return self._index.exists(uuid)
         try:
             self._photo(uuid)
             return True
@@ -73,7 +134,7 @@ class PhotoscriptWriter:
             keywords=tuple(p.keywords or ()),
             favorite=bool(p.favorite),
             date=p.date,
-            albums=tuple(a.name for a in p.albums),
+            albums=self._index.albums(uuid) if self._index is not None else tuple(a.name for a in p.albums),
         )
 
     def set_title(self, uuid: str, value: str) -> None:

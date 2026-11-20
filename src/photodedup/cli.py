@@ -30,7 +30,7 @@ from photodedup.pairarchive import archived, read_pairs_rows, run_pair_archive, 
 from photodedup.pairplan import plan_catalog
 from photodedup.reviewpage import write_review_page
 from photodedup.pairs import PAIRS_ALBUM, PairResult, apply_choices, read_pairs, resolve_pairs, swap_dates
-from photodedup.photos_write import PhotosUnavailable, PhotoscriptWriter
+from photodedup.photos_write import DEFAULT_LIBRARY, PhotosUnavailable, PhotoscriptWriter
 from photodedup.report import duplicate_report, survey_report
 from photodedup.review import write_review
 from photodedup.sets import run_sets
@@ -458,13 +458,24 @@ def pairs(pairs_csv: Path, dry_run: bool, log: Path, archived_in: Path | None, c
     swapped = sum(c == "swap" for c in choices.values())
     if choices:
         click.echo(f"review choices: {len(both)} pairs keep both, {swapped} swapped to keep the other copy")
+    library = DEFAULT_LIBRARY
+    if archived_in is not None:
+        run_row = get_run(open_catalog(archived_in))
+        if run_row is not None and run_row["library_path"]:
+            library = Path(run_row["library_path"])
+    if not (library / "database" / "Photos.sqlite").exists():
+        raise click.ClickException(f"no Photos library at {library}")
     unarchived: list[PairResult] = []
     if archived_in is not None:
         have = archived(open_catalog(archived_in), [p.loser for p in chosen])
         unarchived = [PairResult(p, "skipped", "loser not archived") for p in chosen if p.loser not in have]
         chosen = [p for p in chosen if p.loser in have]
     try:
-        results = kept + unarchived + resolve_pairs(PhotoscriptWriter(), chosen, dry_run=dry_run)
+        results = kept + unarchived + resolve_pairs(
+            PhotoscriptWriter(library), chosen, dry_run=dry_run,
+            progress=lambda done, total, counts: click.echo(
+                f"  {done}/{total}: " + ", ".join(f"{v} {k}" for k, v in sorted(counts.items())), err=True),
+        )
     except PhotosUnavailable as exc:
         raise click.ClickException(str(exc)) from exc
     log.parent.mkdir(parents=True, exist_ok=True)
