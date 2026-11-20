@@ -118,7 +118,7 @@ def resolve_pairs(writer: PhotosWriter, pairs: list[Pair], *, dry_run: bool = Fa
 def _resolve_one(writer: PhotosWriter, pair: Pair, dry_run: bool, staging: list[str],
                  sleep: Callable[[float], None]) -> PairResult:
     if not (writer.exists(pair.keeper) and writer.exists(pair.loser)):
-        return PairResult(pair, "skipped", "keeper or loser is not in the library (gone, trashed, or Shared with You)")
+        return PairResult(pair, "skipped", "keeper or loser is not in the library (gone, trashed, Shared with You, or in a shared album)")
     try:
         keeper, loser = writer.get(pair.keeper), writer.get(pair.loser)
     except Exception as exc:

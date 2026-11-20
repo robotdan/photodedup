@@ -13,7 +13,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 
+SHARED_ALBUM = 4
 SHARED_WITH_YOU = 12
+# Saved-asset types that sit in Photos.sqlite outside the user's own library.
+NOT_IN_LIBRARY = frozenset({SHARED_ALBUM, SHARED_WITH_YOU})
 DEFAULT_LIBRARY = Path.home() / "Pictures" / "Photos Library.photoslibrary"
 
 
@@ -80,9 +83,11 @@ class LibraryIndex:
         except sqlite3.OperationalError:
             row = self._conn.execute("SELECT ZTRASHEDSTATE, ZSAVEDASSETTYPE FROM ZASSET WHERE ZUUID = ?",
                                      (uuid,)).fetchone()
-        # Saved-asset type 12 is a "Shared with You" item from Messages: it sits
-        # in the database but outside the library AppleScript can reach.
-        return row is not None and not row[0] and row[1] != SHARED_WITH_YOU
+        # Type 12 is a "Shared with You" item from Messages, which AppleScript
+        # cannot reach. Type 4 is an iCloud Shared Album photo: adding one to an
+        # album makes Photos import a new copy and add that instead, and
+        # photoscript retries the add five times, so each try is another copy.
+        return row is not None and not row[0] and row[1] not in NOT_IN_LIBRARY
 
     def albums(self, uuid: str) -> tuple[str, ...]:
         """Names of the user albums (any folder) that hold the photo."""
