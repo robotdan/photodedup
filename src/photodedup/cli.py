@@ -42,6 +42,17 @@ from photodedup.survey import (
 from photodedup.verify import run_verify, verify_report
 
 DEFAULT_LIBRARY = Path.home() / "Pictures" / "Photos Library.photoslibrary"
+
+
+def _library_for(conn) -> Path:
+    """The library a catalog was surveyed from, else the default one. Writers
+    built with it read existence and albums from Photos.sqlite: through
+    AppleScript an album lookup walks every album and costs minutes a photo."""
+    run_row = get_run(conn) if conn is not None else None
+    library = Path(run_row["library_path"]) if run_row is not None and run_row["library_path"] else DEFAULT_LIBRARY
+    if not (library / "database" / "Photos.sqlite").exists():
+        raise click.ClickException(f"no Photos library at {library}")
+    return library
 DEFAULT_CATALOG = Path("catalog.sqlite")
 DEFAULT_ARCHIVE = Path("/Volumes/Extreme Pro/photodedup")
 
@@ -358,7 +369,7 @@ def apply(catalog: Path, do_merge: bool, do_dates: bool, do_stage: bool, do_all:
         return
     try:
         require_archive(conn)
-        writer = _NullWriter() if dry_run else PhotoscriptWriter()
+        writer = _NullWriter() if dry_run else PhotoscriptWriter(_library_for(conn))
         notes: list[str] = []
         if do_merge:
             r = run_merge(conn, writer, dry_run=dry_run)
@@ -458,13 +469,7 @@ def pairs(pairs_csv: Path, dry_run: bool, log: Path, archived_in: Path | None, c
     swapped = sum(c == "swap" for c in choices.values())
     if choices:
         click.echo(f"review choices: {len(both)} pairs keep both, {swapped} swapped to keep the other copy")
-    library = DEFAULT_LIBRARY
-    if archived_in is not None:
-        run_row = get_run(open_catalog(archived_in))
-        if run_row is not None and run_row["library_path"]:
-            library = Path(run_row["library_path"])
-    if not (library / "database" / "Photos.sqlite").exists():
-        raise click.ClickException(f"no Photos library at {library}")
+    library = _library_for(open_catalog(archived_in) if archived_in is not None else None)
     unarchived: list[PairResult] = []
     if archived_in is not None:
         have = archived(open_catalog(archived_in), [p.loser for p in chosen])

@@ -95,7 +95,7 @@ def test_apply_real_write_needs_a_gui_session(catalog, monkeypatch):
 
     conn = open_catalog(catalog); set_stage(conn, "arbitrate", "complete"); set_stage(conn, "archive", "complete"); conn.close()
 
-    def boom():
+    def boom(*_):
         raise PhotosUnavailable(
             "Photos cannot be scripted from this process (photoscript failed to load). "
             "Run this command from an interactive terminal session on the Mac that owns the library."
