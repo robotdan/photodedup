@@ -1,6 +1,6 @@
 """Put a list of photos back in the pairs staging album.
 
-    uv run python scripts/restage.py reports/restage_2026-11-20.txt KEEPERS.csv...
+    uv run python one-offs/restage.py reports/restage_2026-11-20.txt KEEPERS.csv...
 
 Refuses any uuid that is a keeper in one of the given pairs CSVs, adds the rest
 in batches, then counts the album from Photos.sqlite.

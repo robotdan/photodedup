@@ -41,7 +41,6 @@ from photodedup.survey import (
 )
 from photodedup.verify import run_verify, verify_report
 
-DEFAULT_LIBRARY = Path.home() / "Pictures" / "Photos Library.photoslibrary"
 
 
 def _library_for(conn) -> Path:
@@ -53,8 +52,19 @@ def _library_for(conn) -> Path:
     if not (library / "database" / "Photos.sqlite").exists():
         raise click.ClickException(f"no Photos library at {library}")
     return library
+
+
 DEFAULT_CATALOG = Path("catalog.sqlite")
-DEFAULT_ARCHIVE = Path("/Volumes/Extreme Pro/photodedup")
+ARCHIVE_ENV = "PHOTODEDUP_ARCHIVE"
+
+
+def _root_option(f):
+    """--root, the archive folder on an external drive. No default: a wrong
+    guess would copy tens of gigabytes to the internal disk."""
+    return click.option(
+        "--root", type=click.Path(path_type=Path), envvar=ARCHIVE_ENV, required=True,
+        help=f"Archive folder, usually on an external drive. Or set {ARCHIVE_ENV}.",
+    )(f)
 
 
 class _NullWriter:
@@ -282,9 +292,7 @@ def review(
 @click.option(
     "--catalog", type=click.Path(path_type=Path), default=DEFAULT_CATALOG, show_default=True
 )
-@click.option(
-    "--root", type=click.Path(path_type=Path), default=DEFAULT_ARCHIVE, show_default=True
-)
+@_root_option
 @click.option("--limit", type=int, default=None, help="Copy at most this many losers, for a trial run.")
 def archive(catalog: Path, root: Path, limit: int | None) -> None:
     """Copy every loser's original to the archive and verify it. Read-only against Photos; resumable."""
@@ -553,7 +561,7 @@ def plan_pairs(catalog: Path, out: Path, dates_out: Path, review_out: Path, excl
 @main.command("archive-pairs")
 @click.argument("pairs_csv", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option("--catalog", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=True)
-@click.option("--root", type=click.Path(path_type=Path), default=DEFAULT_ARCHIVE, show_default=True)
+@_root_option
 def archive_pairs(pairs_csv: Path, catalog: Path, root: Path) -> None:
     """Copy each pairs-CSV loser's original to the archive and verify it; also
     put edit pairs side by side under edits-review/. Read-only against Photos; resumable."""
@@ -656,7 +664,7 @@ def measure_edits(pairs_csv: Path, catalog: Path, out: Path) -> None:
 @main.command("review-page")
 @click.argument("pairs_csv", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option("--catalog", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=True)
-@click.option("--root", type=click.Path(path_type=Path), default=DEFAULT_ARCHIVE, show_default=True)
+@_root_option
 @click.option("--diffs", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None,
               help="A measure-edits CSV: show only pairs that visibly differ, largest difference first.")
 def review_page(pairs_csv: Path, catalog: Path, root: Path, diffs: Path | None) -> None:

@@ -141,3 +141,12 @@ def test_archive_destination_error_is_a_clean_message(catalog, tmp_path, monkeyp
 
 def test_verify_command_exists():
     assert "verify" in run("--help").output
+
+
+def test_archive_root_has_no_default(catalog, tmp_path, monkeypatch):
+    monkeypatch.delenv("PHOTODEDUP_ARCHIVE", raising=False)
+    result = run("archive", "--catalog", str(catalog))
+    assert result.exit_code != 0 and "--root" in result.output
+    monkeypatch.setenv("PHOTODEDUP_ARCHIVE", str(tmp_path / "arc"))
+    result = run("archive", "--catalog", str(catalog))
+    assert "arbitrate stage" in result.output
